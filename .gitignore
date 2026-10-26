@@ -1,0 +1,6 @@
+# build artifacts of the host tests (make -f Makefile.host test)
+build/
+*.o
+*.ko
+*.a
+.DS_Store

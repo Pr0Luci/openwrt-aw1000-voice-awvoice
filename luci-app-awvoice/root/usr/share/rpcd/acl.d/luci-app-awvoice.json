@@ -1,0 +1,24 @@
+{
+	"luci-app-awvoice": {
+		"description": "Grant access to the phone page: its settings, the phone service's status and tests",
+		"read": {
+			"uci": [ "awvoice" ],
+			"file": {
+				"/sbin/logread": [ "exec" ],
+				"/sbin/logread -e awvoice-phoned": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ],
+				"system": [ "info" ],
+				"awvoice": [ "status", "health", "calls", "forwarding_get" ]
+			}
+		},
+		"write": {
+			"uci": [ "awvoice" ],
+			"ubus": {
+				"awvoice": [ "hangup", "ring_test", "line_test", "loopback_test", "reload", "calls_delete" ],
+				"luci.awvoice": [ "service" ]
+			}
+		}
+	}
+}

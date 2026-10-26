@@ -1,0 +1,15 @@
+# The section map for this router model's stock phone module: which module objects fill which
+# board-file sections. The object names are the stock module's own; the sizes are verified by
+# the extractor against the module itself. A board file built with this map carries the ten
+# configuration sections (the daemon's init script, converter words and filter values come with
+# the shipped default board file).
+general  Si3226x_General_Configuration 224
+dcfeed   Si3226x_DCfeed_Presets 384
+fsk      Si3226x_FSK_Presets 56
+gpio     Si3226x_GPIO_Configuration 7
+imped    Si3226x_Impedance_Presets 256
+pcm      Si3226x_PCM_Presets 20
+pulse    Si3226x_PulseMeter_Presets 16
+ring     Si3226x_Ring_Presets 528
+tone     Si3226x_Tone_Presets 324
+gain     Si3226x_audioGain_Presets 48

@@ -1,0 +1,58 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 Pr0Luci
+#
+# rpcd plugin "luci.awvoice": the phone page's one privileged action, start / stop / restart of the phone service.
+# The authority is here, not in the page: stop and restart are refused while a call is going (the service's own status
+# says so), then the service is driven through procd's rc object.
+
+SERVICE=awvoice
+
+reply() {	# ok, refused ("null" or a quoted word)
+	printf '{"ok":%s,"refused":%s}\n' "$1" "$2"
+}
+
+call_going() {
+	local st state
+	st=$(ubus call awvoice status 2>/dev/null) || return 1	# no answer: the service is down, nothing to protect
+	[ "$(jsonfilter -s "$st" -t '@.call' 2>/dev/null)" = object ] && return 0
+	state=$(jsonfilter -s "$st" -e '@.state' 2>/dev/null)
+	[ "$state" = ring ] || [ "$state" = call ]
+}
+
+service() {
+	local input action
+	input=$(cat)
+	action=$(jsonfilter -s "$input" -e '@.action' 2>/dev/null)
+
+	case "$action" in
+	start) ;;
+	stop|restart)
+		if call_going; then
+			reply false '"ACTIVE_CALL"'
+			return
+		fi
+		;;
+	*)
+		reply false '"NOT_AVAILABLE"'
+		return
+		;;
+	esac
+
+	if ubus call rc init "{\"name\":\"$SERVICE\",\"action\":\"$action\"}" >/dev/null 2>&1; then
+		reply true null
+	else
+		reply false '"NOT_AVAILABLE"'
+	fi
+}
+
+case "$1" in
+list)
+	printf '{"service":{"action":"str"}}\n'
+	;;
+call)
+	case "$2" in
+	service) service ;;
+	esac
+	;;
+esac

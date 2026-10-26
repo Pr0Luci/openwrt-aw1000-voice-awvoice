@@ -1,0 +1,14 @@
+{
+	"admin/services/awvoice": {
+		"title": "AWvoice(RJ11)",
+		"order": 38,
+		"action": {
+			"type": "view",
+			"path": "awvoice/phone"
+		},
+		"depends": {
+			"acl": [ "luci-app-awvoice" ],
+			"uci": { "awvoice": true }
+		}
+	}
+}

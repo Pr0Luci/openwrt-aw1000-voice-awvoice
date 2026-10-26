@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
+obj-m += awvoice_fxs.o
+awvoice_fxs-y := src/main.o src/hw.o src/spi.o src/watchdog.o src/bridge.o
+ccflags-y += -I$(src)/include/uapi -Wall -Wextra -Wno-unused-parameter
