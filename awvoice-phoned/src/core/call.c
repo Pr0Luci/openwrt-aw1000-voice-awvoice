@@ -2140,7 +2140,10 @@ int phone_open(struct phone **out, struct chip *c, const struct board *b, const 
 	const struct board_section *tones = board_find(b, "tone");
 	unsigned int ch = cfg->channel;
 	struct phone *p = NULL;
+	struct wideband wb;
 	int err, leave, fed = 0, det_on = 0, ring_ok = 0;
+
+	memset(&wb, 0, sizeof(wb));
 
 	*out = NULL;
 	if (!words || words->length != CONVERTER_SIZE) {
@@ -2173,11 +2176,11 @@ int phone_open(struct phone **out, struct chip *c, const struct board *b, const 
 		if (err)
 			fprintf(log, "  FAILED on channel %u: voice path (%d)\n", ch, err);
 	}
-	if (fed && !err && p && p->cfg.hd && (err = wideband_apply(c, ch, &p->wb, 1, log)) != 0)
+	if (fed && !err && cfg->hd && (err = wideband_apply(c, ch, &wb, 1, log)) != 0)
 		return err;			/* the wideband registers did not take: the line is closed and brought up again */
 	if (fed && !err && hooks && hooks->bridge_start) {
 		err = hooks->bridge_start(hooks->ctx, BRIDGE_MODEM_RX, BRIDGE_MODEM_TX, BRIDGE_LINE_RX, BRIDGE_LINE_TX,
-			p && p->cfg.hd ? PHONE_BRIDGE_WIDEBAND : 0);
+			cfg->hd ? PHONE_BRIDGE_WIDEBAND : 0);
 		if (err) {
 			fprintf(log, "  FAILED on channel %u: bridge start (%d)\n", ch, err);
 		} else {
@@ -2199,6 +2202,7 @@ int phone_open(struct phone **out, struct chip *c, const struct board *b, const 
 		} else {
 			p->ring_ready = ring_ok;
 			p->det_on = det_on;
+			p->wb = wb;		/* the wideband state was applied before the phone existed: it moves into it here */
 		}
 	}
 	if (!err) {
