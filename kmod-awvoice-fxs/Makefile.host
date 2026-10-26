@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Host tests of the module's plain arithmetic: make -f Makefile.host test
+CC ?= cc
+CFLAGS ?= -O2 -Wall -Wextra
+
+test: build/test_window
+	mkdir -p build
+	build/test_window
+
+build/test_window: tests/test_window.c src/window.h
+	mkdir -p build
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -o $@ tests/test_window.c
+
+clean:
+	rm -rf build
