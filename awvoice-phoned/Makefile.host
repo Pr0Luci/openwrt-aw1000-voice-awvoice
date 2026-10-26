@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Host build of the daemon's hardware-independent parts and their tests: make -f Makefile.host test
+# The cross-build of the daemon itself (needs libubox, libuci and the kernel's UAPI header): make -f Makefile.host awvoice-phoned CC=<cross compiler> STAGING=<target staging dir>
+CC ?= cc
+CFLAGS ?= -O2 -Wall -Wextra
+SAN = -fsanitize=address,undefined
+CORE = src/core
+DAEMON = src/daemon
+INC = -I$(CORE) -I$(DAEMON) -Itests
+CORE_SRC = $(addprefix $(CORE)/,chip.c board.c stages.c converter.c line.c call.c script.c answer.c ring.c cid.c contacts.c hookwatch.c modemq.c numbers.c result.c phonebook.c blocking.c alarm.c forward.c wideband.c)
+CORE_OBJ = $(patsubst $(CORE)/%.c,build/%.o,$(CORE_SRC))
+CORE_HDR = $(wildcard $(CORE)/*.h)
+DAEMON_HDR = $(wildcard $(DAEMON)/*.h)
+# the core's AT client finds its port with the daemon's port finder
+PORT = $(DAEMON)/port.c
+CALLLOG = $(DAEMON)/calllog.c
+INDICATOR = $(DAEMON)/indicator.c
+FAKES = tests/fakes.c tests/fakes.h
+
+TESTS = build/test_hookwatch build/test_config build/test_board build/test_port build/test_daemon build/test_reply build/test_modemq build/test_numbers build/test_calllog build/test_phonebook build/test_blocking build/test_alarm build/test_forward build/test_answer build/test_indicator
+
+test: core $(TESTS)
+	build/test_hookwatch && echo "hookwatch: all tests passed"
+	build/test_config
+	build/test_board
+	build/test_port
+	build/test_daemon
+	build/test_reply
+	build/test_modemq
+	build/test_numbers
+	build/test_calllog
+	build/test_phonebook
+	build/test_blocking
+	build/test_alarm
+	build/test_forward
+	build/test_answer
+	build/test_indicator
+
+# every core source compiles on its own, with the sanitizers (the core is also exercised through the stage tool's tests: make -C tools/slic test)
+core: $(CORE_OBJ)
+
+build/%.o: $(CORE)/%.c $(CORE_HDR) $(DAEMON_HDR)
+	@mkdir -p build
+	$(CC) $(CFLAGS) $(SAN) $(INC) -c -o $@ $<
+
+build/test_hookwatch: tests/test_hookwatch.c $(CORE)/hookwatch.c $(CORE)/hookwatch.h
+	$(CC) $(CFLAGS) $(SAN) -o $@ tests/test_hookwatch.c $(CORE)/hookwatch.c
+
+build/test_config: tests/test_config.c $(DAEMON)/config.c $(DAEMON)/config.h $(CORE)/hookwatch.h $(CORE)/phone.h $(CORE)/numbers.c $(CORE)/numbers.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_config.c $(DAEMON)/config.c $(CORE)/numbers.c
+
+build/test_board: tests/test_board.c $(CORE)/board.c $(CORE)/board.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_board.c $(CORE)/board.c
+
+build/test_numbers: tests/test_numbers.c $(CORE)/numbers.c $(CORE)/numbers.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_numbers.c $(CORE)/numbers.c
+
+build/test_port: tests/test_port.c $(PORT) $(DAEMON)/port.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_port.c $(PORT)
+
+build/test_daemon: tests/test_daemon.c $(CORE_SRC) $(CORE_HDR) $(PORT) $(DAEMON)/port.h $(FAKES)
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_daemon.c tests/fakes.c $(CORE_SRC) $(PORT)
+
+build/test_modemq: tests/test_modemq.c $(CORE)/modemq.c $(CORE)/modemq.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_modemq.c $(CORE)/modemq.c
+
+build/test_reply: tests/test_reply.c $(DAEMON)/reply.c $(DAEMON)/reply.h $(INDICATOR) $(CALLLOG) $(CORE_SRC) $(CORE_HDR) $(PORT) $(FAKES)
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_reply.c $(DAEMON)/reply.c $(INDICATOR) $(CALLLOG) tests/fakes.c $(CORE_SRC) $(PORT)
+
+build/test_indicator: tests/test_indicator.c $(INDICATOR) $(DAEMON)/config.c $(DAEMON)/indicator.h $(CORE_HDR)
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_indicator.c $(INDICATOR) $(DAEMON)/config.c $(CORE)/numbers.c
+
+build/test_forward: tests/test_forward.c $(CORE)/forward.c $(CORE)/forward.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_forward.c $(CORE)/forward.c
+
+build/test_answer: tests/test_answer.c $(CORE)/answer.c $(CORE)/answer.h $(PORT)
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_answer.c $(CORE)/answer.c $(PORT)
+
+build/test_alarm: tests/test_alarm.c $(CORE)/alarm.c $(CORE)/alarm.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_alarm.c $(CORE)/alarm.c
+
+build/test_blocking: tests/test_blocking.c $(CORE)/blocking.c $(CORE)/blocking.h $(CORE)/numbers.c $(CORE)/numbers.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_blocking.c $(CORE)/blocking.c $(CORE)/numbers.c
+
+build/test_phonebook: tests/test_phonebook.c $(CORE)/phonebook.c $(CORE)/phonebook.h $(CORE)/numbers.c $(CORE)/numbers.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_phonebook.c $(CORE)/phonebook.c $(CORE)/numbers.c
+
+build/test_calllog: tests/test_calllog.c $(CALLLOG) $(DAEMON)/calllog.h $(CORE)/result.c $(CORE_HDR)
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_calllog.c $(CALLLOG) $(CORE)/result.c
+
+# the daemon (Linux only): libubox's event loop, libubus and libuci; no sanitizers, warnings are errors
+UAPI ?= ../kmod-awvoice-fxs/include/uapi
+STAGING ?=
+DAEMON_SRC = $(DAEMON)/main.c $(DAEMON)/hw.c $(DAEMON)/config.c $(DAEMON)/config_uci.c $(DAEMON)/api.c $(DAEMON)/reply.c $(DAEMON)/indicator.c $(CALLLOG) $(PORT) $(CORE_SRC)
+
+awvoice-phoned: $(DAEMON_SRC) $(CORE_HDR) $(DAEMON_HDR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Werror -ffunction-sections -fdata-sections $(INC) -I$(UAPI) \
+		$(if $(STAGING),-I$(STAGING)/usr/include -L$(STAGING)/usr/lib) \
+		-o $@ $(DAEMON_SRC) $(LDFLAGS) -lubus -lubox -luci -Wl,--gc-sections
+
+clean:
+	rm -rf build $(TESTS) awvoice-phoned
