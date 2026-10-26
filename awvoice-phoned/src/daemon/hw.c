@@ -75,8 +75,8 @@ int dev_open(struct device *d)
 
 int dev_prepare(struct device *d, int wideband)
 {
-	/* the wideband frame reaches bit 175: the slots 0..11 of the 16 the 256-bit frame holds */
-	struct awfxs_pcm_up up = { .cfg = { .ctrl = PCM_CTRL, .bitmap = wideband ? 0xfffu : PCM_SLOTS, .divider = 1 } };
+	/* the wideband frame reaches bit 175: the slots 0..10 of the 16 the 256-bit frame holds */
+	struct awfxs_pcm_up up = { .cfg = { .ctrl = PCM_CTRL, .bitmap = wideband ? 0x7ffu : PCM_SLOTS, .divider = 1 } };
 	__u32 reset_ms = RESET_LOW_MS;
 
 	if (ioctl(d->fd, AWFXS_IOC_PCM_UP, &up) || ioctl(d->fd, AWFXS_IOC_CHIP_RESET, &reset_ms))
