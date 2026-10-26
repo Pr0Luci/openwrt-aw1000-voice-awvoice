@@ -50,8 +50,10 @@ define Package/awvoice-phoned/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/files/awvoice.init $(1)/etc/init.d/awvoice
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/files/awvoice.config $(1)/etc/config/awvoice
 	$(INSTALL_DATA) files/board.bin $(1)/usr/share/awvoice/board-default.bin
-	grep -qxF "/etc/awvoice/board.bin" $(1)/etc/sysupgrade.conf 2>/dev/null || \
-		echo "/etc/awvoice/board.bin" >> $(1)/etc/sysupgrade.conf
+	# board.bin lives under /etc, which sysupgrade keeps, and the default board
+	# file is reinstalled at the first start if it is gone - it is never listed
+	# here: a package may not ship a file another package already owns
+	# (/etc/sysupgrade.conf belongs to base-files; apk rejects the overlap).
 endef
 
 # enabled at boot, not started here: a package install never touches a live phone line (the installer starts it)
