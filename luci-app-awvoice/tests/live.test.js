@@ -93,7 +93,7 @@ async function main() {
 	// save: validated first (nothing written), then write -> commit -> reload
 	const good = () => ({ line: { cid: 'dtmf', myNumber: '0112345678', dialPauseSec: 6 }, hookFlash: { minMs: 80, maxMs: 300 }, tones: { ringback: 'auto' },
 		audio: { earpieceVolume: null, modemRxGain: 8192, micGainDb: null, earpieceGainDb: null }, modem: { usbInterface: 2 },
-		features: { clir: 'network', conference: false, callWaiting: true, hotline: { number: '', delaySec: 10 } }, indicator: { led: '' }, page: { refreshSec: 1 } });
+		features: { clir: 'network', conference: false, callWaiting: true, hotline: { number: '', delaySec: 10 } }, indicator: { led: '', ringRateMs: 300, offhookRateMs: 1000 }, page: { refreshSec: 1 } });
 	t = makeProvider({ replies: { 'uci.commit': {}, 'awvoice.reload': { ok: true } } });
 	let bad = good(); bad.hookFlash = { minMs: 250, maxMs: 300 };
 	await assert.rejects(t.p.savePhoneSettings(bad), /100 ms/);
