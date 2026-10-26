@@ -7,7 +7,7 @@
  * style.js - the stylesheet of the phone page, injected once as a <style> element.
  *
  * Every rule is scoped under .avp and every colour or size comes from a token that resolves in this order:
- *   1. the in-house theme's --zy-* variable (when that theme is active),
+ *   1. the in-house theme's --ax-* variable (when that theme is active),
  *   2. the stock theme's variable (--background-color-*, ...),
  *   3. a neutral system value.
  * So the page follows whichever theme is selected, light or dark, with no theme-specific layout code.
@@ -19,23 +19,23 @@
 var STYLE_ID = 'avp-style';
 
 var CSS = [
-'.avp{--av-fg:var(--zy-fg,var(--text-color-high,CanvasText));',
-'--av-mut:var(--zy-muted,var(--text-color-medium,GrayText));',
-'--av-card:var(--zy-card,var(--background-color-high,Canvas));',
-'--av-sub:var(--zy-card2,var(--background-color-medium,rgba(128,128,128,.1)));',
-'--av-bd:var(--zy-border,var(--border-color-medium,rgba(128,128,128,.35)));',
-'--av-bd2:var(--zy-border-strong,var(--border-color-high,rgba(128,128,128,.55)));',
-'--av-ac:var(--zy-accent-text,var(--primary-color-high,LinkText));',
-'--av-dim:var(--zy-accent-dim,rgba(128,128,128,.14));',
-'--av-ok:var(--zy-ok,var(--success-color-medium,#2e7d32));',
-'--av-warn:var(--zy-warn,var(--warn-color-medium,#b26a00));',
-'--av-err:var(--zy-err,var(--error-color-medium,#c62828));',
-'--av-mono:var(--zy-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);',
-'--av-r:var(--zy-r,4px);--av-chip:0px;--av-row:44px;--av-it:40px;',
+'.avp{--av-fg:var(--ax-fg,var(--text-color-high,CanvasText));',
+'--av-mut:var(--ax-muted,var(--text-color-medium,GrayText));',
+'--av-card:var(--ax-card,var(--background-color-high,Canvas));',
+'--av-sub:var(--ax-card2,var(--background-color-medium,rgba(128,128,128,.1)));',
+'--av-bd:var(--ax-border,var(--border-color-medium,rgba(128,128,128,.35)));',
+'--av-bd2:var(--ax-border-strong,var(--border-color-high,rgba(128,128,128,.55)));',
+'--av-ac:var(--ax-accent-text,var(--primary-color-high,LinkText));',
+'--av-dim:var(--ax-accent-dim,rgba(128,128,128,.14));',
+'--av-ok:var(--ax-ok,var(--success-color-medium,#2e7d32));',
+'--av-warn:var(--ax-warn,var(--warn-color-medium,#b26a00));',
+'--av-err:var(--ax-err,var(--error-color-medium,#c62828));',
+'--av-mono:var(--ax-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);',
+'--av-r:var(--ax-r,4px);--av-chip:0px;--av-row:44px;--av-it:40px;',
 'container-type:inline-size;container-name:avp;color:var(--av-fg);min-width:0}',
 '.avp *{box-sizing:border-box}',
 '.avp [hidden]{display:none!important}',
-/* the in-house theme sets its content text at 12px (stock themes use 13px, which the page then inherits) */
+/* the in-house theme, like the stock themes, sets its content text at 13px, which the page then inherits */
 '.avp .av-mono{font-family:var(--av-mono)}',
 '.avp .av-mut{color:var(--av-mut)}',
 '.avp .av-ok{color:var(--av-ok)}.avp .av-warn{color:var(--av-warn)}.avp .av-err{color:var(--av-err)}',
@@ -139,8 +139,8 @@ var CSS = [
 
 /* toast */
 '.av-toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:3000;max-width:90vw;padding:8px 14px;',
-'border:1px solid var(--zy-accent,var(--primary-color-high,currentColor));border-radius:var(--zy-r,4px);',
-'background:var(--zy-card2,var(--background-color-high,Canvas));color:var(--zy-fg,var(--text-color-high,CanvasText))}',
+'border:1px solid var(--ax-accent,var(--primary-color-high,currentColor));border-radius:var(--ax-r,4px);',
+'background:var(--ax-card2,var(--background-color-high,Canvas));color:var(--ax-fg,var(--text-color-high,CanvasText))}',
 '.av-toast[hidden]{display:none}',
 
 /* tab bar: keep it on one scrolling line on narrow screens */
