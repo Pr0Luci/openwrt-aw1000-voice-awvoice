@@ -9,3 +9,7 @@ build/
 tools/luci-qa.sh
 tools/luci-qa.js
 tools/luci-qa.README.md
+
+# documents stay local (the maintainer's notes and rules); the public README is the one exception
+*.md
+!README.md
