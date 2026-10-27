@@ -316,6 +316,8 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 				snprintf(base2, sizeof(base2), "%.*s", (int)strlen(d.rec_name) - 4, d.rec_name);
 				if (recorder_start(&d.rec, d.cfg.record_path, base2, (u32)d.rec_rate, 2)) {
 					dev_tap_set(&d.dev, 0);
+					d.rec_call_id = 0;
+					d.rec_name[0] = 0;	/* the log never names a file that was not written */
 					d.rec_armed = 0;
 					break;
 				}
@@ -335,6 +337,8 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 			err = recorder_feed(&d.rec, samples, n);
 			if (err) {
 				dev_tap_set(&d.dev, 0);	/* the failed feed discarded its tmp: the tap goes quiet with it */
+				d.rec_call_id = 0;
+				d.rec_name[0] = 0;		/* the log never names a file that was not written */
 				d.rec_armed = 0;
 				break;
 			}
@@ -553,6 +557,8 @@ static void record_call_event(struct daemon *dm, const struct phone_event *ev)
 		}
 		if (err) {
 			dev_tap_set(&dm->dev, 0);
+			dm->rec_call_id = 0;
+			dm->rec_name[0] = 0;		/* the log never names a file that was not written */
 			printf("the call was not recorded: %s\n", strerror(-err));
 			return;
 		}
@@ -570,8 +576,11 @@ static void record_call_event(struct daemon *dm, const struct phone_event *ev)
 		saved = recorder_finish(&dm->rec);
 		if (saved >= 0)
 			printf("the recording was saved: %lld bytes\n", saved);
-		else
+		else {
+			dm->rec_call_id = 0;
+			dm->rec_name[0] = 0;	/* the log never names a file that was not written */
 			printf("the recording failed: %s\n", strerror((int)-saved));
+		}
 	}
 }
 
