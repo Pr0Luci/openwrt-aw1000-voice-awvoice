@@ -366,8 +366,8 @@ static int m_recording_get(struct ubus_context *ctx, struct ubus_object *obj, st
 	const char *name;
 	u32 offset;
 	FILE *f;
-	unsigned char hdr[44];
-	u32 rate = 0, channels = 0, data = 0, take;
+	struct stat st;
+	u32 take;
 
 	(void)obj; (void)method;
 	blobmsg_parse(recording_get_policy, RG_MAX, tb, blob_data(msg), blob_len(msg));
@@ -381,17 +381,16 @@ static int m_recording_get(struct ubus_context *ctx, struct ubus_object *obj, st
 	f = fopen(path, "r");
 	if (!f)
 		return UBUS_STATUS_NOT_FOUND;
-	if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || recording_wav_probe(hdr, &rate, &channels, &data)) {
-		fclose(f);
-		return UBUS_STATUS_NOT_FOUND;
-	}
-	if (offset > data) {
+	/* offset is a plain file offset: 0 carries the header, so the page assembles the exact file */
+	if (fstat(fileno(f), &st) || offset > (u32)st.st_size) {
 		fclose(f);
 		return UBUS_STATUS_INVALID_ARGUMENT;
 	}
-	take = data - offset;
+	take = (u32)st.st_size - offset;
 	if (take > RECORDING_CHUNK)
 		take = RECORDING_CHUNK;
+	if (offset)
+		fseek(f, offset, SEEK_SET);
 	raw = malloc(take ? take : 1);
 	b64 = malloc(take ? take * 2 : 2);
 	if (!raw || !b64) {
@@ -406,11 +405,10 @@ static int m_recording_get(struct ubus_context *ctx, struct ubus_object *obj, st
 	fclose(f);
 	blob_buf_init(&reply_buf, 0);
 	blobmsg_add_string(&reply_buf, "name", name);
-	blobmsg_add_u32(&reply_buf, "rate", rate);
-	blobmsg_add_u32(&reply_buf, "total", data);
+	blobmsg_add_u32(&reply_buf, "total", (u32)st.st_size);
 	blobmsg_add_u32(&reply_buf, "offset", offset);
 	blobmsg_add_string(&reply_buf, "b64", b64);
-	blobmsg_add_u8(&reply_buf, "more", offset + take < data);
+	blobmsg_add_u8(&reply_buf, "more", offset + take < (u32)st.st_size);
 	free(raw);
 	free(b64);
 	return send_reply(ctx, req);
