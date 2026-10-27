@@ -3,13 +3,18 @@
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra
 
-test: build/test_window
+test: build/test_window build/test_tap
 	mkdir -p build
 	build/test_window
+	build/test_tap
 
 build/test_window: tests/test_window.c src/window.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -o $@ tests/test_window.c
+
+build/test_tap: tests/test_tap.c src/tap_ring.h
+	mkdir -p build
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -o $@ tests/test_tap.c
 
 clean:
 	rm -rf build
