@@ -66,7 +66,7 @@ function fmtSize(bytes) {
 }
 
 /* the canonical 44-byte WAV header of the daemon's recording core: 16-bit mono PCM, little-endian fields */
-function wavHeader(rate, dataBytes) {
+function wavHeader(rate, channels, dataBytes) {
 	var h = new Uint8Array(44), dv = new DataView(h.buffer), i;
 	for (i = 0; i < 4; i++) {
 		h[i] = 'RIFF'.charCodeAt(i);
@@ -77,10 +77,10 @@ function wavHeader(rate, dataBytes) {
 	dv.setUint32(4, 36 + dataBytes, true);
 	dv.setUint32(16, 16, true);
 	dv.setUint16(20, 1, true);
-	dv.setUint16(22, 1, true);
+	dv.setUint16(22, channels, true);
 	dv.setUint32(24, rate, true);
-	dv.setUint32(28, rate * 2, true);
-	dv.setUint16(32, 2, true);
+	dv.setUint32(28, rate * channels * 2, true);
+	dv.setUint16(32, channels * 2, true);
 	dv.setUint16(34, 16, true);
 	dv.setUint32(40, dataBytes, true);
 	return h;
@@ -151,7 +151,7 @@ return baseclass.extend({
 				var dataBytes = wav.parts.reduce(function(a, p) { return a + p.length; }, 0);
 				if ([ 8000, 16000 ].indexOf(wav.rate) < 0)
 					throw new Error(_('This recording cannot be played here.'));
-				playUrl = URL.createObjectURL(new Blob([ wavHeader(wav.rate, dataBytes) ].concat(wav.parts), { type: 'audio/wav' }));
+				playUrl = URL.createObjectURL(new Blob([ wavHeader(wav.rate, rec.channels || 2, dataBytes) ].concat(wav.parts), { type: 'audio/wav' }));
 				expanded = rec.name;
 				draw();
 			}, function(e) {
@@ -179,7 +179,7 @@ return baseclass.extend({
 			btn.lastChild.textContent = _('Loading…');
 			fetchAll(rec).then(function(wav) {
 				var dataBytes = wav.parts.reduce(function(a, p) { return a + p.length; }, 0);
-				var url = URL.createObjectURL(new Blob([ wavHeader(wav.rate, dataBytes) ].concat(wav.parts), { type: 'audio/wav' }));
+				var url = URL.createObjectURL(new Blob([ wavHeader(wav.rate, rec.channels || 2, dataBytes) ].concat(wav.parts), { type: 'audio/wav' }));
 				var a = E('a', { 'href': url, 'download': rec.name });
 
 				document.body.appendChild(a);

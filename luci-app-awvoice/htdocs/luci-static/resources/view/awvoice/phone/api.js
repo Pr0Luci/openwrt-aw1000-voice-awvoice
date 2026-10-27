@@ -98,7 +98,8 @@ var api = {
 			return list.map(function(x) {
 				return {
 					name: str(x.name), bytes: Math.max(0, num(x.bytes) || 0),
-					rate: Math.max(0, num(x.rate) || 0), seconds: Math.max(0, num(x.seconds) || 0)
+					rate: Math.max(0, num(x.rate) || 0), seconds: Math.max(0, num(x.seconds) || 0),
+					channels: Math.max(1, num(x.channels) || 1)
 				};
 			});
 		}, function(e) { throw fail(e); });
