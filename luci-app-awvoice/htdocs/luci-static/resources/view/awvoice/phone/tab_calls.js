@@ -81,6 +81,138 @@ function b64RawLen(b64) {
 	return b64.length / 4 * 3 - (b64.length - b64.replace(/=+$/, '').length);
 }
 
+/* ---- call recordings: the files live on the router's storage; the page fetches, plays, saves and deletes ---- */
+
+var recList = null, recBusy = null, recPlaying = null, recAudio = null, recUrl = null, recNotify = null;
+
+/* a recording belongs to the call whose id and start time its name carries */
+function recFor(c) {
+	if (!recList)
+		return null;
+	for (var k = 0; k < recList.length; k++) {
+		var m = /^(\d+)-\d+\.wav$/.exec(recList[k].name);
+		if (m && Math.abs(+m[1] - (c.ts || 0)) < 120)
+			return recList[k];
+	}
+	return null;
+}
+
+function recRefresh(ctx) {
+	return ctx.api.listRecordings().then(function(list) { recList = list; },
+		function(e) { recList = []; ctx.toast(e.message); });
+}
+
+/* one headless audio element for the whole tab: redraws move the buttons, never the sound */
+function recAudioFor(url) {
+	if (!recAudio) {
+		recAudio = new window.Audio();
+		recAudio.addEventListener('ended', function() { recPlaying = null; if (recNotify) recNotify(); });
+	}
+	if (recAudio.src !== url)
+		recAudio.src = url;
+	return recAudio;
+}
+
+/* the chunks are fetched one after another until a reply says no more follow */
+function recFetchAll(ctx, rec) {
+	var parts = [];
+	function next(offset) {
+		return ctx.api.getRecording(rec.name, offset).then(function(c) {
+			parts.push(b64Bytes(c.b64));
+			return c.more ? next(c.offset + b64RawLen(c.b64)) : { total: c.total || rec.bytes, parts: parts };
+		});
+	}
+	return next(0);
+}
+
+/* the recording's own button: Play or Pause while it sounds, Loading while the chunks travel */
+function recButton(ctx, rec) {
+	var u = ctx.ui;
+	var busy = recBusy === rec.name,
+		playing = recPlaying === rec.name && recAudio && !recAudio.paused;
+
+	return u.button(busy ? _('Loading…') : playing ? _('Pause') : _('Play'),
+		playing && !busy ? 'pause' : 'play', busy ? 'av-busy cbi-button-action' : 'cbi-button-action',
+		function() { recPlayPause(ctx, rec); });
+}
+
+function recPlayPause(ctx, rec) {
+	if (recBusy === rec.name)
+		return;
+	if (recPlaying === rec.name && recAudio) {
+		if (recAudio.paused)
+			recAudio.play();
+		else
+			recAudio.pause();
+		if (recNotify) recNotify();
+		return;
+	}
+	recBusy = rec.name;
+	if (recNotify) recNotify();
+	recFetchAll(ctx, rec).then(function(wav) {
+		recUrl = URL.createObjectURL(new Blob(wav.parts, { type: 'audio/wav' }));
+		recAudioFor(recUrl);
+		recAudio.play().catch(function() {});
+		recPlaying = rec.name;
+		recBusy = null;
+		if (recNotify) recNotify();
+	}, function(e) {
+		recBusy = null;
+		if (recNotify) recNotify();
+		ctx.toast(e.message);
+	});
+}
+
+function recSave(ctx, rec, btn) {
+	if (recBusy === rec.name)
+		return;
+	recBusy = rec.name;
+	if (recNotify) recNotify();
+	btn.disabled = true;
+	recFetchAll(ctx, rec).then(function(wav) {
+		recUrl = URL.createObjectURL(new Blob(wav.parts, { type: 'audio/wav' }));
+		var a = E('a', { 'href': recUrl, 'download': rec.name });
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+		setTimeout(function() { URL.revokeObjectURL(recUrl); }, 1000);
+		recBusy = null;
+		btn.disabled = false;
+		if (recNotify) recNotify();
+	}, function(e) {
+		recBusy = null;
+		btn.disabled = false;
+		if (recNotify) recNotify();
+		ctx.toast(e.message);
+	});
+}
+
+function recDelete(ctx, rec) {
+	if (recPlaying === rec.name || recBusy === rec.name)
+		recStop();
+	editors.confirm(ctx, _('Delete recording'), _('Delete this recording? This cannot be undone.'), _('Delete'),
+		function() {
+			ctx.api.deleteRecording(rec.name).then(function() {
+				recList = null;
+				recRefresh(ctx).then(function() { if (recNotify) recNotify(); });
+				if (recNotify) recNotify();
+				ctx.toast(_('Recording deleted'));
+			}, function(e) { ctx.toast(e.message); });
+		});
+}
+
+function recStop() {
+	if (recAudio) {
+		recAudio.pause();
+		recAudio.src = '';
+	}
+	if (recUrl)
+		URL.revokeObjectURL(recUrl);
+	recUrl = null;
+	recPlaying = null;
+	recBusy = null;
+}
+
 return baseclass.extend({
 	row: function(ctx, c, selected, handler) {
 		var u = ctx.ui, name = (c.name || ctx.nameFor(c.number)), shown = c.number || _('Withheld');
@@ -93,140 +225,6 @@ return baseclass.extend({
 			E('span', { 'class': 'd' }, u.fmtWhen(c.ts)),
 			E('span', { 'class': 'm av-mono' }, name ? c.number : typeLabel(c.type)),
 			E('span', { 'class': 't av-mono' }, u.fmtDuration(c.durationSec))
-		]);
-	},
-
-	/* the Recordings card: the calls the daemon kept on its storage, fetched once on the tab's first paint and
-	 * again on refresh. Only one recording is open at a time; its player sits inline under the row. */
-	recordings: function(ctx) {
-		var u = ctx.ui;
-		var recs = [], expanded = null, playUrl = null;
-
-		var rows = E('div', { 'class': 'av-list-rows' });
-		var none = E('div', { 'class': 'av-empty' }, _('Loading…'));
-		var refreshBtn = u.button(_('Refresh'), 'refresh', '', function() { list(); });
-
-		function forgetPlayer() {
-			if (playUrl)
-				URL.revokeObjectURL(playUrl);
-			playUrl = null;
-			expanded = null;
-		}
-
-		/* the chunks are fetched one after another until a reply says no more follow */
-		function fetchAll(rec) {
-			var parts = [];
-			function next(offset) {
-				return ctx.api.getRecording(rec.name, offset).then(function(c) {
-					parts.push(b64Bytes(c.b64));
-					return c.more ? next(c.offset + b64RawLen(c.b64)) : { total: c.total || rec.bytes, parts: parts };
-				});
-			}
-			return next(0);
-		}
-
-		function play(rec, btn) {
-			forgetPlayer();
-			draw();
-			btn.disabled = true;
-			btn.lastChild.textContent = _('Loading…');
-			fetchAll(rec).then(function(wav) {
-				playUrl = URL.createObjectURL(new Blob(wav.parts, { type: 'audio/wav' }));
-				expanded = rec.name;
-				draw();
-			}, function(e) {
-				btn.disabled = false;
-				btn.lastChild.textContent = _('Play');
-				ctx.toast(e.message);
-			});
-		}
-
-		function remove(rec) {
-			editors.confirm(ctx, _('Delete recording'), _('Delete this recording? This cannot be undone.'), _('Delete'), function() {
-				return ctx.api.deleteRecording(rec.name).then(function() {
-					if (expanded === rec.name)
-						forgetPlayer();
-					recs = recs.filter(function(x) { return x.name !== rec.name; });
-					draw();
-					ctx.toast(_('Recording deleted'));
-				});
-			});
-		}
-
-		/* the whole WAV - header and samples - to the computer's downloads: the browser saves it as the file's own name */
-		function download(rec, btn) {
-			btn.disabled = true;
-			btn.lastChild.textContent = _('Loading…');
-			fetchAll(rec).then(function(wav) {
-				var url = URL.createObjectURL(new Blob(wav.parts, { type: 'audio/wav' }));
-				var a = E('a', { 'href': url, 'download': rec.name });
-
-				document.body.appendChild(a);
-				a.click();
-				a.remove();
-				setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
-				btn.disabled = false;
-				btn.lastChild.textContent = _('Save');
-			}, function(e) {
-				btn.disabled = false;
-				btn.lastChild.textContent = _('Save');
-				ctx.toast(e.message);
-			});
-		}
-
-		/* when it was recorded, how long and how big, then the play and delete controls */
-		function rowNode(rec) {
-			var ts = recWhen(rec.name);
-			var playBtn = u.button(_('Play'), 'play', '', function() { play(rec, playBtn); });
-			var saveBtn = u.button(_('Save'), 'download', '', function() { download(rec, saveBtn); });
-			return E('div', { 'class': 'av-it' }, [
-				E('div', { 'class': 't' }, [
-					ts != null ? u.fmtWhen(ts) : rec.name.replace(/\.wav$/, ''),
-					E('small', { 'class': 'av-mono' }, u.fmtDuration(rec.seconds) + ' - ' + fmtSize(rec.bytes))
-				]),
-				playBtn,
-				saveBtn,
-				u.iconButton(_('Delete recording'), 'trash', function() { remove(rec); }, 'cbi-button-remove')
-			]);
-		}
-
-		function playerNode() {
-			return E('div', { 'class': 'av-inl' }, [
-				E('audio', { 'controls': 'controls', 'src': playUrl }),
-				u.iconButton(_('Close player'), 'x', function() { forgetPlayer(); draw(); })
-			]);
-		}
-
-		function draw() {
-			refreshBtn.disabled = false;
-			rows.textContent = '';
-			recs.forEach(function(rec) {
-				rows.appendChild(rowNode(rec));
-				if (rec.name === expanded)
-					rows.appendChild(playerNode());
-			});
-			none.hidden = recs.length > 0;
-			none.textContent = _('Nothing to show yet.');
-		}
-
-		function list() {
-			refreshBtn.disabled = true;
-			return ctx.api.listRecordings().then(function(what) {
-				recs = what;
-				draw();
-			}, function(e) {
-				recs = [];
-				draw();
-				ctx.toast(e.message);
-			});
-		}
-
-		draw();
-		list();
-		return E('div', { 'class': 'cbi-section' }, [
-			E('h3', [ _('Recordings'), E('span', { 'class': 'av-r' }, refreshBtn) ]),
-			E('div', { 'class': 'av-note' }, _('Calls this router recorded on its own storage. Playing one here does not touch the line.')),
-			rows, none
 		]);
 	},
 
@@ -274,6 +272,8 @@ return baseclass.extend({
 				acts.push(blockBtn(c));
 			}
 
+			var rec = recFor(c);
+
 			return E('div', [
 				E('h3', [
 					callIcon(u, c),
@@ -286,7 +286,13 @@ return baseclass.extend({
 				u.kv(_('Date'), u.fmtWhen(c.ts)),
 				u.kv(_('Duration'), u.fmtDuration(c.durationSec), 'av-mono'),
 				u.kv(_('Result'), resultLabel(c.result) + (cause ? ' - ' + cause : '')),
-				E('div', { 'class': 'av-acts' }, acts)
+				u.kv(_('Recording'), rec ? u.fmtDuration(rec.seconds) + ' - ' + fmtSize(rec.bytes)
+					+ (rec.channels == 2 ? ' - ' + _('stereo') : '') : _('None')),
+				E('div', { 'class': 'av-acts' }, acts.concat(rec ? [
+					recButton(ctx, rec),
+					u.button(_('Save'), 'download', 'cbi-button-action', function() { recSave(ctx, rec); }),
+					u.button(_('Delete'), 'trash', 'cbi-button-remove important', function() { recDelete(ctx, rec); })
+				] : []))
 			]);
 		}
 
@@ -399,6 +405,9 @@ return baseclass.extend({
 		ctx.on('contacts', redraw);
 		ctx.on('select', function(id) { sel = id; redraw(); });
 		ctx.on('calls', redraw);
+		ctx.on('recordings', redraw);
+		recNotify = function() { redraw(); };
+		recRefresh(ctx);
 
 		return E('div', [ u.off([
 			chips,
@@ -407,6 +416,6 @@ return baseclass.extend({
 				E('div', { 'class': 'cbi-section av-list' }, [ rows, none ]),
 				detail
 			])
-		]), self.recordings(ctx) ]);
+		]) ]);
 	}
 });

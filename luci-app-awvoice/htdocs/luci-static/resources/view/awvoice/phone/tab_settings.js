@@ -56,6 +56,7 @@ var refresh = u.select(REFRESH_STEPS.map(function(n) { return [ String(n), n ===
 var recEnabled = u.checkbox(false, _('Record phone calls'));
 var recPath = u.text('', '/etc/awvoice/recordings', 'av-mono wide');
 var recMax = num('recmax', 1, 4095, _('Recording budget in megabytes'));
+var recUsage = E('span', { 'class': 'av-mono' }, '');
 
 	/* the FSK variants carry the timing choice; DTMF has its own placement (it goes out while the phone rings) */
 	function fskPicked() {
@@ -121,6 +122,30 @@ var recMax = num('recmax', 1, 4095, _('Recording budget in megabytes'));
 				recPath.value = s.path;
 				recMax.value = String(s.maxMb);
 			}, function(e) { err.textContent = err.textContent || e.message; });
+		}
+
+		function recRefreshUsage() {
+			return ctx.api.listRecordings().then(function(list) {
+				var bytes = list.reduce(function(a, r) { return a + r.bytes; }, 0);
+				recUsage.textContent = list.length ?
+					_('%d recordings, %s MB on the storage').format(list.length, (bytes / 1048576).toFixed(1)) : _('No recordings on the storage.');
+				return list;
+			});
+		}
+
+		function recDeleteAll() {
+			return recRefreshUsage().then(function(list) {
+				if (!list.length)
+					return;
+				editors.confirm(ctx, _('Delete all recordings'),
+					_('Delete all %d recordings? This cannot be undone.').format(list.length), _('Delete all'),
+					function() {
+						return Promise.all(list.map(function(r) { return ctx.api.deleteRecording(r.name); })).then(function() {
+							ctx.toast(_('Recordings deleted'));
+							recRefreshUsage();
+						}, function(e) { ctx.toast(e.message); });
+					});
+			});
 		}
 
 		function optInt(el) {
@@ -232,7 +257,10 @@ var recMax = num('recmax', 1, 4095, _('Recording budget in megabytes'));
 				u.field(_('Record calls'), _('Off by default'), E('div', { 'class': 'av-inline' }, [ recEnabled.node ])),
 				u.field(_('Recording folder'), _('Where the recordings are kept. The folder must start with a slash.'), recPath),
 				u.field(_('Storage budget'), _('The recordings may fill this many megabytes before the oldest give way (1 to 4095)'),
-					E('div', { 'class': 'av-inline' }, [ recMax, E('span', { 'class': 'av-mut' }, 'MB') ]))
+					E('div', { 'class': 'av-inline' }, [ recMax, E('span', { 'class': 'av-mut' }, 'MB') ])),
+				u.field(_('Stored recordings'), _('Everything recorded so far lives in the recording folder.'),
+					E('div', { 'class': 'av-inline' }, [ recUsage,
+						u.button(_('Delete all'), 'trash', 'cbi-button-remove important', function() { recDeleteAll(); }) ]))
 			]),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', [ _('Speed dial'),
@@ -261,12 +289,13 @@ var recMax = num('recmax', 1, 4095, _('Recording budget in megabytes'));
 			err,
 			E('div', { 'class': 'av-acts' }, [
 				u.button(_('Save and apply'), '', 'cbi-button-save important', save),
-				u.button(_('Reset'), '', 'cbi-button-reset', function() { load(); loadRec(); })
+				u.button(_('Reset'), '', 'cbi-button-reset', function() { load(); loadRec(); recRefreshUsage(); })
 			])
 		]);
 
 		load();
 		loadRec();
+	recRefreshUsage();
 		drawSpeed();
 		return root;
 	}
