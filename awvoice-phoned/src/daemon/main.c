@@ -291,29 +291,37 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 		indicator_step(&d.ind, &st, now);	/* the phone LED follows the line (the patterns, indicator.c) */
 	}
 	if (d.rec.open && d.rec_armed) {
-		struct awfxs_tap_frame frames[32];
+		struct awfxs_tap_frame frames[256];
 		struct awfxs_tap_read meta;
-		uint16_t samples[128];
-		unsigned int got = dev_tap_read(&d.dev, frames, 32, &meta), k, n = 0;
+		uint16_t samples[1024];
+		unsigned int got, k, n, loops = 0;
+		int err = 0;
 
-		if (meta.generation != d.rec_generation) {
-			/* the bridge restarted under the recording (an HD switch changes the rate with it):
-			 * the part so far is kept and a new file starts at the new rate */
-			long long saved = recorder_finish(&d.rec);
+		/* the bridge hands out 8000 frames a second and a tick is 5 ms: a single read of 32 frames drained
+		 * only 6400 a second, the ring filled in about five seconds and the file turned to distortion.
+		 * Drain until the ring is empty (bounded by the ring itself) before the next tick. */
+		do {
+			got = dev_tap_read(&d.dev, frames, 256, &meta);
+			if (meta.generation != d.rec_generation) {
+				/* the bridge restarted under the recording (an HD switch changes the rate with it):
+				 * the part so far is kept and a new file starts at the new rate */
+				long long saved = recorder_finish(&d.rec);
 
-			if (saved >= 0)
-				printf("the recording goes on in a new file after the rate change (%lld bytes kept)\n", saved);
-			d.rec_rate = phone_hd_active(d.phone) && d.cfg.hd ? 16000 : 8000;
-			snprintf(d.rec_name, sizeof(d.rec_name), "%lld-%u", api_epoch_s(now, now), d.rec_call_id);
-			if (recorder_start(&d.rec, d.cfg.record_path, d.rec_name, (u32)d.rec_rate, 2)) {
-				dev_tap_set(&d.dev, 0);
-				d.rec_armed = 0;
+				if (saved >= 0)
+					printf("the recording goes on in a new file after the rate change (%lld bytes kept)\n", saved);
+				d.rec_rate = phone_hd_active(d.phone) && d.cfg.hd ? 16000 : 8000;
+				snprintf(d.rec_name, sizeof(d.rec_name), "%lld-%u", api_epoch_s(now, now), d.rec_call_id);
+				if (recorder_start(&d.rec, d.cfg.record_path, d.rec_name, (u32)d.rec_rate, 2)) {
+					dev_tap_set(&d.dev, 0);
+					d.rec_armed = 0;
+					break;
+				}
 			}
-		}
-		if (d.rec.open && d.rec_armed) {
+			if (!got)
+				break;
 			/* interleaved stereo: the far end (the modem's slot) and the handset (the line chip's slot);
 			 * wideband adds the second time sample of each, so the pair is 16 kHz like the call itself */
-			for (k = 0; k < got; k++) {
+			for (k = 0, n = 0; k < got; k++) {
 				samples[n++] = frames[k].modem;
 				samples[n++] = frames[k].line;
 				if (meta.wideband && d.rec_rate == 16000) {
@@ -321,11 +329,13 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 					samples[n++] = frames[k].line2;
 				}
 			}
-			if (n && recorder_feed(&d.rec, samples, n)) {
+			err = recorder_feed(&d.rec, samples, n);
+			if (err) {
 				dev_tap_set(&d.dev, 0);	/* the failed feed discarded its tmp: the tap goes quiet with it */
 				d.rec_armed = 0;
+				break;
 			}
-		}
+		} while (++loops < 32);	/* 32 x 256 frames is the whole ring; more cannot arrive inside one tick */
 	}
 	api_tick(&d.api);
 	if (d.calls.ram_dirty || d.calls.flash_dirty) {
