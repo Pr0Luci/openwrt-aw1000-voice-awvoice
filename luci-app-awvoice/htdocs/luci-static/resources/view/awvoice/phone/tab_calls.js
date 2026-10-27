@@ -7,7 +7,8 @@
 /*
  * tab_calls.js - Calls tab: call history with type filter, search, date filter, CSV export, clear per type and a
  * detail view (side panel on wide containers, inline under the tapped row on narrow ones; the CSS decides which one
- * is visible, so both are rendered).
+ * is visible, so both are rendered). Under the call list sits the Recordings card: what the daemon kept, played and
+ * deleted here.
  *
  * Also exports row() so the Overview "Last calls" list looks the same. The call log is a later milestone: while
  * api.available.listCalls is false the tab shows a note and every control is disabled.
@@ -54,6 +55,49 @@ function csvCell(v) {
 	return '"' + s.replace(/"/g, '""') + '"';
 }
 
+/* a recording's name leads with its epoch (digits and dashes, ending .wav) */
+function recWhen(name) {
+	var ts = parseInt(String(name).replace(/\.wav$/, '').split('-')[0], 10);
+	return isNaN(ts) ? null : ts;
+}
+
+function fmtSize(bytes) {
+	return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' ' + _('MB') : Math.max(1, Math.round(bytes / 1024)) + ' ' + _('KB');
+}
+
+/* the canonical 44-byte WAV header of the daemon's recording core: 16-bit mono PCM, little-endian fields */
+function wavHeader(rate, dataBytes) {
+	var h = new Uint8Array(44), dv = new DataView(h.buffer), i;
+	for (i = 0; i < 4; i++) {
+		h[i] = 'RIFF'.charCodeAt(i);
+		h[8 + i] = 'WAVE'.charCodeAt(i);
+		h[12 + i] = 'fmt '.charCodeAt(i);
+		h[36 + i] = 'data'.charCodeAt(i);
+	}
+	dv.setUint32(4, 36 + dataBytes, true);
+	dv.setUint32(16, 16, true);
+	dv.setUint16(20, 1, true);
+	dv.setUint16(22, 1, true);
+	dv.setUint32(24, rate, true);
+	dv.setUint32(28, rate * 2, true);
+	dv.setUint16(32, 2, true);
+	dv.setUint16(34, 16, true);
+	dv.setUint32(40, dataBytes, true);
+	return h;
+}
+
+function b64Bytes(b64) {
+	var bin = atob(b64), out = new Uint8Array(bin.length), i;
+	for (i = 0; i < bin.length; i++)
+		out[i] = bin.charCodeAt(i);
+	return out;
+}
+
+/* the raw length of one base64 chunk: the contract's way to name the next offset */
+function b64RawLen(b64) {
+	return b64.length / 4 * 3 - (b64.length - b64.replace(/=+$/, '').length);
+}
+
 return baseclass.extend({
 	row: function(ctx, c, selected, handler) {
 		var u = ctx.ui, name = (c.name || ctx.nameFor(c.number)), shown = c.number || _('Withheld');
@@ -66,6 +110,120 @@ return baseclass.extend({
 			E('span', { 'class': 'd' }, u.fmtWhen(c.ts)),
 			E('span', { 'class': 'm av-mono' }, name ? c.number : typeLabel(c.type)),
 			E('span', { 'class': 't av-mono' }, u.fmtDuration(c.durationSec))
+		]);
+	},
+
+	/* the Recordings card: the calls the daemon kept on its storage, fetched once on the tab's first paint and
+	 * again on refresh. Only one recording is open at a time; its player sits inline under the row. */
+	recordings: function(ctx) {
+		var u = ctx.ui;
+		var recs = [], expanded = null, playUrl = null;
+
+		var rows = E('div', { 'class': 'av-list-rows' });
+		var none = E('div', { 'class': 'av-empty' }, _('Loading…'));
+		var refreshBtn = u.button(_('Refresh'), 'refresh', '', function() { list(); });
+
+		function forgetPlayer() {
+			if (playUrl)
+				URL.revokeObjectURL(playUrl);
+			playUrl = null;
+			expanded = null;
+		}
+
+		/* the chunks are fetched one after another until a reply says no more follow */
+		function fetchAll(rec) {
+			var parts = [];
+			function next(offset) {
+				return ctx.api.getRecording(rec.name, offset).then(function(c) {
+					parts.push(b64Bytes(c.b64));
+					return c.more ? next(c.offset + b64RawLen(c.b64)) : { rate: c.rate || rec.rate, parts: parts };
+				});
+			}
+			return next(0);
+		}
+
+		function play(rec, btn) {
+			forgetPlayer();
+			draw();
+			btn.disabled = true;
+			btn.lastChild.textContent = _('Loading…');
+			fetchAll(rec).then(function(wav) {
+				var dataBytes = wav.parts.reduce(function(a, p) { return a + p.length; }, 0);
+				if ([ 8000, 16000 ].indexOf(wav.rate) < 0)
+					throw new Error(_('This recording cannot be played here.'));
+				playUrl = URL.createObjectURL(new Blob([ wavHeader(wav.rate, dataBytes) ].concat(wav.parts), { type: 'audio/wav' }));
+				expanded = rec.name;
+				draw();
+			}, function(e) {
+				btn.disabled = false;
+				btn.lastChild.textContent = _('Play');
+				ctx.toast(e.message);
+			});
+		}
+
+		function remove(rec) {
+			editors.confirm(ctx, _('Delete recording'), _('Delete this recording? This cannot be undone.'), _('Delete'), function() {
+				return ctx.api.deleteRecording(rec.name).then(function() {
+					if (expanded === rec.name)
+						forgetPlayer();
+					recs = recs.filter(function(x) { return x.name !== rec.name; });
+					draw();
+					ctx.toast(_('Recording deleted'));
+				});
+			});
+		}
+
+		/* when it was recorded, how long and how big, then the play and delete controls */
+		function rowNode(rec) {
+			var ts = recWhen(rec.name);
+			var playBtn = u.button(_('Play'), 'play', '', function() { play(rec, playBtn); });
+			return E('div', { 'class': 'av-it' }, [
+				E('div', { 'class': 't' }, [
+					ts != null ? u.fmtWhen(ts) : rec.name.replace(/\.wav$/, ''),
+					E('small', { 'class': 'av-mono' }, u.fmtDuration(rec.seconds) + ' - ' + fmtSize(rec.bytes))
+				]),
+				playBtn,
+				u.iconButton(_('Delete recording'), 'trash', function() { remove(rec); }, 'cbi-button-remove')
+			]);
+		}
+
+		function playerNode() {
+			return E('div', { 'class': 'av-inl' }, [
+				E('audio', { 'controls': 'controls', 'src': playUrl }),
+				u.iconButton(_('Close player'), 'x', function() { forgetPlayer(); draw(); })
+			]);
+		}
+
+		function draw() {
+			refreshBtn.disabled = false;
+			rows.textContent = '';
+			recs.forEach(function(rec) {
+				rows.appendChild(rowNode(rec));
+				if (rec.name === expanded)
+					rows.appendChild(playerNode());
+			});
+			none.hidden = recs.length > 0;
+			none.textContent = _('Nothing to show yet.');
+		}
+
+		function list() {
+			refreshBtn.disabled = true;
+			return ctx.api.listRecordings().then(function(what) {
+				recs = what;
+				draw();
+			}, function(e) {
+				recs = [];
+				draw();
+				ctx.toast(e.message);
+			});
+		}
+
+		draw();
+		list();
+		return E('div', { 'class': 'cbi-section' }, [
+			E('h3', [ _('Recordings'), E('span', { 'class': 'av-r' }, refreshBtn) ]),
+			E('div', { 'class': 'av-note' }, _('Calls this router recorded on its own storage. Playing one here does not touch the line.')),
+			rows, none
 		]);
 	},
 
@@ -246,6 +404,6 @@ return baseclass.extend({
 				E('div', { 'class': 'cbi-section av-list' }, [ rows, none ]),
 				detail
 			])
-		]) ]);
+		]), self.recordings(ctx) ]);
 	}
 });
