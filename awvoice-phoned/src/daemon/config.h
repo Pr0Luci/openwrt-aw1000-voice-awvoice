@@ -34,6 +34,9 @@
  *   conference        0                          0 | 1                              allows the join of two calls (flash and 3)
  *   region            LK                         a region of the number table       how national numbers become international (core/numbers.h)
  *   hd                0                          0 | 1                              HD voice (16 kHz) is wanted; while the wideband line path is not built (while the wideband path is pending) the line stays at 8 kHz and the health reply reports hdVoice "set"
+ *   record_enabled    0                          0 | 1                              1 = answered calls are recorded as WAV files (16-bit PCM, the call's own rate); off by default: a recording law may ask for an announcement
+ *   record_max_mb     50                         1..4095                            the recordings directory's budget; when it is passed the oldest files are deleted before a new one starts
+ *   record_path       /etc/awvoice/recordings    a directory                        where the WAV files land; a mount can be named for more room
  *
  * Shared with the phone page, read by the daemon in M5 (listed so the names stay fixed; the page's DESIGN.md §2 and §5 give
  * their ranges): mic_gain_db,
@@ -79,6 +82,9 @@ struct aw_config {
 	unsigned int ring_rate_ms;	/* the indicator's fast blink (an incoming call), 100..3000 */
 	unsigned int offhook_rate_ms;	/* the indicator's slow blink (the handset up), 200..10000 */
 	int hd;				/* 1 = HD voice (16 kHz) is wanted; the wideband path is pending (see the table above) */
+	int record_enabled;		/* 1 = answered calls are recorded as WAV files (opt-in: a recording law may ask for an announcement) */
+	unsigned int record_max_mb;	/* the recordings directory's budget in MB; the oldest files go first */
+	char record_path[AW_CONFIG_PATH_MAX];	/* where the WAV files land; a mount can be named for more room */
 };
 
 /* the defaults above */

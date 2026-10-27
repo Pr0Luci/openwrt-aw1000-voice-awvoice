@@ -26,4 +26,9 @@ int dev_bridge_stats(void *ctx, void *out);
 /* phone_hooks.bridge_start for ctx = struct device *: the cross bridge between the modem's and the line's PCM slots */
 int dev_bridge_start(void *ctx, unsigned int modem_rx, unsigned int modem_tx, unsigned int line_rx, unsigned int line_tx, unsigned int flags);
 
+/* the kernel bridge's capture tap (uapi AWFXS_IOC_TAP_*): arm or disarm it, then drain frames while it runs.
+ * dev_tap_read fills `meta` always (generation, wideband, dropped) and returns the frames copied (0 when the ring is empty). */
+int dev_tap_set(struct device *d, int on);	/* 0 or -errno; arming needs a running bridge */
+unsigned int dev_tap_read(struct device *d, struct awfxs_tap_frame *frames, unsigned int max, struct awfxs_tap_read *meta);
+
 #endif /* AW_PHONED_HW_H */

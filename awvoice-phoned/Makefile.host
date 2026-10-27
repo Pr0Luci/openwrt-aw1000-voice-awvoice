@@ -99,7 +99,7 @@ build/test_calllog: tests/test_calllog.c $(CALLLOG) $(DAEMON)/calllog.h $(CORE)/
 # the daemon (Linux only): libubox's event loop, libubus and libuci; no sanitizers, warnings are errors
 UAPI ?= ../kmod-awvoice-fxs/include/uapi
 STAGING ?=
-DAEMON_SRC = $(DAEMON)/main.c $(DAEMON)/hw.c $(DAEMON)/config.c $(DAEMON)/config_uci.c $(DAEMON)/api.c $(DAEMON)/reply.c $(DAEMON)/indicator.c $(CALLLOG) $(PORT) $(CORE_SRC)
+DAEMON_SRC = $(DAEMON)/main.c $(DAEMON)/hw.c $(DAEMON)/config.c $(DAEMON)/config_uci.c $(DAEMON)/api.c $(DAEMON)/reply.c $(DAEMON)/indicator.c $(CALLLOG) $(DAEMON)/recorder.c $(PORT) $(CORE_SRC)
 
 awvoice-phoned: $(DAEMON_SRC) $(CORE_HDR) $(DAEMON_HDR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Werror -ffunction-sections -fdata-sections $(INC) -I$(UAPI) \

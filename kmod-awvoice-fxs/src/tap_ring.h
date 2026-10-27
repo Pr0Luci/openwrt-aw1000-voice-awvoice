@@ -12,22 +12,23 @@
  */
 #ifdef __KERNEL__
 #include <linux/types.h>
+#include <linux/awvoice-fxs.h>	/* struct awfxs_tap_frame: the ring's element is the tap ioctl's frame */
 #define TAP_STORE_RELEASE(p, v)	smp_store_release(p, v)
 #define TAP_LOAD_ACQUIRE(p)	smp_load_acquire(p)
 #else
 #include <stdint.h>
 typedef uint16_t u16;
 typedef uint32_t u32;
-#define TAP_STORE_RELEASE(p, v)	(*(p) = (v))
-#define TAP_LOAD_ACQUIRE(p)	(*(p))
-#endif
-
+/* the same layout the UAPI header declares for the kernel's side */
 struct awfxs_tap_frame {
 	u16 modem;		/* what the modem sent this frame */
 	u16 line;		/* what the line chip sent; 0 in LOOP mode */
 	u16 modem2;		/* wideband second sample; 0 when narrowband */
 	u16 line2;
 };
+#define TAP_STORE_RELEASE(p, v)	(*(p) = (v))
+#define TAP_LOAD_ACQUIRE(p)	(*(p))
+#endif
 
 struct awfxs_tap_ring {
 	struct awfxs_tap_frame *slot;	/* capacity is mask + 1, a power of two */

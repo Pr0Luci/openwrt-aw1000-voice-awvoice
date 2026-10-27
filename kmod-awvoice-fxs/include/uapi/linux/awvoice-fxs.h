@@ -133,9 +133,16 @@ struct awfxs_bridge_stats {
  * with AWFXS_IOC_TAP_READ; the tap is inert while disarmed and costs the bridge thread nothing. Arming needs a
  * running bridge. The tap disarms on every bridge stop or restart — a restart may also change the wideband layout —
  * and bumps the generation: a reader that sees a new generation discards what it had and arms again.
- * Each frame read back is four little-endian __u16: modem, line, wideband second modem, wideband second line
- * (the seconds are 0 when narrowband; line is 0 in LOOP mode).
+ * Each frame read back is one awfxs_tap_frame: four little-endian __u16 — modem, line, wideband second modem,
+ * wideband second line (the seconds are 0 when narrowband; line is 0 in LOOP mode).
  */
+struct awfxs_tap_frame {
+	__u16 modem;
+	__u16 line;
+	__u16 modem2;
+	__u16 line2;
+};
+
 struct awfxs_tap_read {
 	__u64 buf;		/* in: user array of frames, four __u16 each */
 	__u32 max_frames;	/* in */
