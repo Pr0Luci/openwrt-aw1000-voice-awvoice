@@ -4,3 +4,8 @@ build/
 *.ko
 *.a
 .DS_Store
+
+# the LuCI QA sweep tool (a local copy; never committed)
+tools/luci-qa.sh
+tools/luci-qa.js
+tools/luci-qa.README.md
