@@ -319,14 +319,14 @@ static int m_recordings(struct ubus_context *ctx, struct ubus_object *obj, struc
 		while ((e = readdir(dir)) != NULL) {
 			FILE *f;
 			unsigned char hdr[44];
-			u32 rate = 0, data = 0;
+			u32 rate = 0, channels = 0, data = 0;
 
 			if (!recording_name_ok(e->d_name))
 				continue;
 			if (snprintf(path, sizeof(path), "%s/%s", the_api->record_path, e->d_name) >= (int)sizeof(path))
 				continue;
 			f = fopen(path, "r");
-			if (!f || fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || recording_wav_probe(hdr, &rate, &data)) {
+			if (!f || fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || recording_wav_probe(hdr, &rate, &channels, &data)) {
 				if (f)
 					fclose(f);
 				continue;		/* not a finished recording of ours: never named, never listed */
@@ -338,7 +338,8 @@ static int m_recordings(struct ubus_context *ctx, struct ubus_object *obj, struc
 				blobmsg_add_string(&reply_buf, "name", e->d_name);
 				blobmsg_add_u32(&reply_buf, "bytes", data + 44);
 				blobmsg_add_u32(&reply_buf, "rate", rate);
-				blobmsg_add_u32(&reply_buf, "seconds", rate ? data / rate / 2 : 0);
+				blobmsg_add_u32(&reply_buf, "channels", channels);
+				blobmsg_add_u32(&reply_buf, "seconds", rate ? data / rate / channels : 0);
 				blobmsg_close_table(&reply_buf, entry);
 			}
 		}
@@ -366,7 +367,7 @@ static int m_recording_get(struct ubus_context *ctx, struct ubus_object *obj, st
 	u32 offset;
 	FILE *f;
 	unsigned char hdr[44];
-	u32 rate = 0, data = 0, take;
+	u32 rate = 0, channels = 0, data = 0, take;
 
 	(void)obj; (void)method;
 	blobmsg_parse(recording_get_policy, RG_MAX, tb, blob_data(msg), blob_len(msg));
@@ -380,7 +381,7 @@ static int m_recording_get(struct ubus_context *ctx, struct ubus_object *obj, st
 	f = fopen(path, "r");
 	if (!f)
 		return UBUS_STATUS_NOT_FOUND;
-	if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || recording_wav_probe(hdr, &rate, &data)) {
+	if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || recording_wav_probe(hdr, &rate, &channels, &data)) {
 		fclose(f);
 		return UBUS_STATUS_NOT_FOUND;
 	}

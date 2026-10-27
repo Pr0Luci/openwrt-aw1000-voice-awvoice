@@ -53,7 +53,7 @@ static void test_lifecycle(const char *dir)
 	u32 k;
 
 	snprintf(path, sizeof(path), "%s/call-1.wav", dir);
-	assert(recorder_start(&rc, dir, "call-1", 8000) == 0);
+	assert(recorder_start(&rc, dir, "call-1", 8000, 1) == 0);
 	assert(rc.open && rc.file && rc.rate == 8000 && rc.data_bytes == 0);
 	assert(!strcmp(rc.final_path, path));
 	snprintf(path, sizeof(path), "%s/call-1.wav.tmp", dir);
@@ -86,7 +86,7 @@ static void test_abort(const char *dir)
 	const u16 samples[4] = { 1, 2, 3, 4 };
 	char path[300];
 
-	assert(recorder_start(&rc, dir, "call-2", 16000) == 0);
+	assert(recorder_start(&rc, dir, "call-2", 16000, 1) == 0);
 	assert(recorder_feed(&rc, samples, 4) == 0 && rc.data_bytes == 8);
 	recorder_abort(&rc);
 	assert(!rc.open && !rc.file);
@@ -104,7 +104,7 @@ static void test_zero(const char *dir)
 	unsigned char buf[64];
 	char path[300];
 
-	assert(recorder_start(&rc, dir, "call-3", 16000) == 0);
+	assert(recorder_start(&rc, dir, "call-3", 16000, 1) == 0);
 	assert(recorder_finish(&rc) == 0);
 	assert(!rc.open && !rc.file);
 	snprintf(path, sizeof(path), "%s/call-3.wav", dir);
@@ -123,7 +123,7 @@ static void test_missing_dir(const char *dir)
 	snprintf(parent, sizeof(parent), "%s/d1", dir);
 	assert(mkdir(parent, 0755) == 0);
 	snprintf(nested, sizeof(nested), "%s/d2", parent);
-	assert(recorder_start(&rc, nested, "call-4", 8000) == 0);
+	assert(recorder_start(&rc, nested, "call-4", 8000, 1) == 0);
 	assert(recorder_finish(&rc) == 0);
 	snprintf(path, sizeof(path), "%s/call-4.wav", nested);
 	assert(read_all(path, buf, sizeof(buf)) == 44);
@@ -141,7 +141,7 @@ static void test_not_open(const char *dir)
 	memset(&rc, 0, sizeof(rc));
 	assert(recorder_finish(&rc) == -EINVAL);
 	recorder_abort(&rc);
-	assert(recorder_start(&rc, dir, "call-5", 8000) == 0);
+	assert(recorder_start(&rc, dir, "call-5", 8000, 1) == 0);
 	assert(recorder_finish(&rc) == 0);
 	assert(recorder_finish(&rc) == -EINVAL);
 	assert(read_all(rc.final_path, buf, sizeof(buf)) == 44);	/* the finished file is untouched */
@@ -154,7 +154,7 @@ static void test_bad_rate(const char *dir)
 	struct recorder rc;
 	char path[300];
 
-	assert(recorder_start(&rc, dir, "call-6", 44100) == -EINVAL);
+	assert(recorder_start(&rc, dir, "call-6", 44100, 1) == -EINVAL);
 	assert(!rc.open && !rc.file);
 	snprintf(path, sizeof(path), "%s/call-6.wav.tmp", dir);
 	assert(gone(path));

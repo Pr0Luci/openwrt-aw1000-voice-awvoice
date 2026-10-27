@@ -7,7 +7,7 @@
 
 #include "recorder.h"
 
-int recorder_start(struct recorder *rc, const char *dir, const char *final_name, u32 rate)
+int recorder_start(struct recorder *rc, const char *dir, const char *final_name, u32 rate, u32 channels)
 {
 	unsigned char header[44];
 	FILE *f;
@@ -16,7 +16,7 @@ int recorder_start(struct recorder *rc, const char *dir, const char *final_name,
 	rc->open = false;
 	if (!dir || !*dir || !final_name || !*final_name)
 		return -EINVAL;
-	if (recording_wav_header(header, rate, 0) != 44)	/* a bad rate is refused before anything is created */
+	if (recording_wav_header(header, rate, channels, 0) != 44)	/* a bad rate or channel count is refused before anything is created */
 		return -EINVAL;
 	if (snprintf(rc->final_path, sizeof(rc->final_path), "%s/%s.wav", dir, final_name) >= (int)sizeof(rc->final_path) ||
 	    snprintf(rc->tmp_path, sizeof(rc->tmp_path), "%s.tmp", rc->final_path) >= (int)sizeof(rc->tmp_path))
@@ -33,6 +33,7 @@ int recorder_start(struct recorder *rc, const char *dir, const char *final_name,
 	}
 	rc->file = f;
 	rc->rate = rate;
+	rc->channels = channels;
 	rc->data_bytes = 0;
 	rc->open = true;
 	return 0;
@@ -63,7 +64,7 @@ long long recorder_finish(struct recorder *rc)
 	f = rc->file;
 	rc->file = NULL;
 	rc->open = false;
-	if (recording_wav_header(buf, rc->rate, rc->data_bytes) != 44 || fseek(f, 0, SEEK_SET) ||
+	if (recording_wav_header(buf, rc->rate, rc->channels, rc->data_bytes) != 44 || fseek(f, 0, SEEK_SET) ||
 	    fwrite(buf, 1, sizeof(buf), f) != sizeof(buf))
 		err = -EIO;
 	if (fflush(f) || ferror(f) || fsync(fileno(f)))

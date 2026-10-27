@@ -37,12 +37,13 @@ static inline void recording_put_le32(unsigned char *p, u32 v)
 	p[3] = (unsigned char)(v >> 24);
 }
 
-/* the 44-byte RIFF/WAVE header for 16-bit mono PCM at `rate`; only 8000 and 16000 are rates, else 0 and nothing written */
-static inline u32 recording_wav_header(void *out, u32 rate, u32 data_bytes)
+/* the 44-byte RIFF/WAVE header for 16-bit PCM at `rate` (1 = mono, 2 = the far end and the handset);
+ * only 8000 and 16000 are rates and only 1 or 2 are channels, else 0 and nothing written */
+static inline u32 recording_wav_header(void *out, u32 rate, u32 channels, u32 data_bytes)
 {
 	unsigned char *p = out;
 
-	if (rate != 8000 && rate != 16000)
+	if ((rate != 8000 && rate != 16000) || (channels != 1 && channels != 2))
 		return 0;
 	p[0] = 'R';
 	p[1] = 'I';
@@ -59,10 +60,10 @@ static inline u32 recording_wav_header(void *out, u32 rate, u32 data_bytes)
 	p[15] = ' ';
 	recording_put_le32(p + 16, 16);		/* the fmt chunk's size */
 	recording_put_le16(p + 20, 1);		/* PCM */
-	recording_put_le16(p + 22, 1);		/* mono */
+	recording_put_le16(p + 22, channels);
 	recording_put_le32(p + 24, rate);
-	recording_put_le32(p + 28, rate * 2);	/* byte rate: 16-bit samples, two bytes per frame */
-	recording_put_le16(p + 32, 2);		/* block align */
+	recording_put_le32(p + 28, rate * channels * 2);	/* byte rate: 16-bit samples, two bytes per frame per channel */
+	recording_put_le16(p + 32, channels * 2);	/* block align */
 	recording_put_le16(p + 34, 16);		/* bits per sample */
 	p[36] = 'd';
 	p[37] = 'a';
@@ -121,18 +122,26 @@ static inline u32 recording_base64(const void *in, u32 len, char *out)
 	return o;
 }
 
-/* read a recording's header back: the rate and the data size behind it. -EINVAL when the bytes are not one of ours. */
-static inline int recording_wav_probe(const void *hdr44, u32 *rate, u32 *data_bytes)
+/* read a recording's header back: the rate, the channel count and the data size behind it. -EINVAL when the bytes
+ * are not one of ours (mono or stereo 16-bit PCM at one of the bus's rates is what we ever write). */
+static inline int recording_wav_probe(const void *hdr44, u32 *rate, u32 *channels, u32 *data_bytes)
 {
 	const unsigned char *p = hdr44;
+	u32 ch;
 
 	if (memcmp(p, "RIFF", 4) || memcmp(p + 8, "WAVE", 4) || memcmp(p + 12, "fmt ", 4) || memcmp(p + 36, "data", 4))
 		return -EINVAL;
-	if (p[20] != 1 || p[21] != 0 || p[22] != 1 || p[23] != 0 || p[34] != 16 || p[35] != 0)
-		return -EINVAL;			/* not 16-bit mono PCM */
+	if (p[20] != 1 || p[21] != 0 || p[34] != 16 || p[35] != 0)
+		return -EINVAL;			/* not 16-bit PCM */
+	ch = (u32)p[22] | ((u32)p[23] << 8);
+	if (ch != 1 && ch != 2)
+		return -EINVAL;
 	*rate = (u32)p[24] | ((u32)p[25] << 8) | ((u32)p[26] << 16) | ((u32)p[27] << 24);
+	*channels = ch;
 	*data_bytes = (u32)p[40] | ((u32)p[41] << 8) | ((u32)p[42] << 16) | ((u32)p[43] << 24);
-	return (*rate == 8000 || *rate == 16000) && *data_bytes % 2 == 0 ? 0 : -EINVAL;
+	if ((*rate != 8000 && *rate != 16000) || p[32] != ch * 2 || p[33] != 0)
+		return -EINVAL;
+	return *data_bytes % (ch * 2) == 0 ? 0 : -EINVAL;
 }
 
 #endif /* AW_PHONED_RECORDING_H */

@@ -293,7 +293,7 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 	if (d.rec.open && d.rec_armed) {
 		struct awfxs_tap_frame frames[32];
 		struct awfxs_tap_read meta;
-		uint16_t samples[64];
+		uint16_t samples[128];
 		unsigned int got = dev_tap_read(&d.dev, frames, 32, &meta), k, n = 0;
 
 		if (meta.generation != d.rec_generation) {
@@ -305,16 +305,21 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 				printf("the recording goes on in a new file after the rate change (%lld bytes kept)\n", saved);
 			d.rec_rate = phone_hd_active(d.phone) && d.cfg.hd ? 16000 : 8000;
 			snprintf(d.rec_name, sizeof(d.rec_name), "%lld-%u", api_epoch_s(now, now), d.rec_call_id);
-			if (recorder_start(&d.rec, d.cfg.record_path, d.rec_name, (u32)d.rec_rate)) {
+			if (recorder_start(&d.rec, d.cfg.record_path, d.rec_name, (u32)d.rec_rate, 2)) {
 				dev_tap_set(&d.dev, 0);
 				d.rec_armed = 0;
 			}
 		}
 		if (d.rec.open && d.rec_armed) {
+			/* interleaved stereo: the far end (the modem's slot) and the handset (the line chip's slot);
+			 * wideband adds the second time sample of each, so the pair is 16 kHz like the call itself */
 			for (k = 0; k < got; k++) {
-				samples[n++] = frames[k].modem;			/* the far end: what a recording is for */
-				if (meta.wideband && d.rec_rate == 16000)
-					samples[n++] = frames[k].modem2;	/* the wideband second sample: the same voice, twice as often */
+				samples[n++] = frames[k].modem;
+				samples[n++] = frames[k].line;
+				if (meta.wideband && d.rec_rate == 16000) {
+					samples[n++] = frames[k].modem2;
+					samples[n++] = frames[k].line2;
+				}
 			}
 			if (n && recorder_feed(&d.rec, samples, n)) {
 				dev_tap_set(&d.dev, 0);	/* the failed feed discarded its tmp: the tap goes quiet with it */
@@ -524,7 +529,7 @@ static void record_call_event(struct daemon *dm, const struct phone_event *ev)
 		dm->rec_call_id = ev->call_id;
 		err = dev_tap_set(&dm->dev, 1);
 		if (!err)
-			err = recorder_start(&dm->rec, dm->cfg.record_path, dm->rec_name, (u32)dm->rec_rate);
+			err = recorder_start(&dm->rec, dm->cfg.record_path, dm->rec_name, (u32)dm->rec_rate, 2);
 		if (err) {
 			dev_tap_set(&dm->dev, 0);
 			printf("the call was not recorded: %s\n", strerror(-err));

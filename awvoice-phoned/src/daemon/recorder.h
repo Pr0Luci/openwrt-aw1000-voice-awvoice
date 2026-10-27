@@ -10,11 +10,12 @@
 #include "recording.h"
 
 /*
- * The file lifecycle of one call recording: a WAV file (16-bit mono PCM) is written whole to `<dir>/<name>.wav.tmp`
+ * The file lifecycle of one call recording: a WAV file (16-bit PCM, one or two channels) is written whole to `<dir>/<name>.wav.tmp`
  * and renamed to `<dir>/<name>.wav` only at the finish, so a power cut never leaves a half recording under the final
  * name. The 44-byte header is written with a zero size at the start and rewritten with the real one at the finish,
  * so the samples can be appended as they are captured. The recorder is channel-agnostic: the caller feeds exactly
- * the samples that belong in the file (the maintainer picks the modem side). Call content is private, so the tmp
+ * the interleaved samples that belong in the file (the daemon feeds the far end and the handset, two channels).
+ * Call content is private, so the tmp
  * file is 0600, like the call log. A finish on a recorder that is not open is -EINVAL and changes nothing; an abort
  * on one is a no-op.
  */
@@ -23,12 +24,13 @@ struct recorder {
 	char tmp_path[PATH_MAX];
 	char final_path[PATH_MAX];
 	u32 rate;
+	u32 channels;			/* 1 = mono, 2 = the far end and the handset interleaved */
 	u32 data_bytes;			/* bytes appended after the 44-byte header */
 	bool open;
 };
 
 /* start `<dir>/<final_name>.wav` through its `.tmp`; the directory is created if missing; 0 or -errno, nothing left behind on error */
-int recorder_start(struct recorder *rc, const char *dir, const char *final_name, u32 rate);
+int recorder_start(struct recorder *rc, const char *dir, const char *final_name, u32 rate, u32 channels);
 
 /* append `count` 16-bit samples to the data section; 0 or -errno, and a failed feed closes and discards the tmp */
 int recorder_feed(struct recorder *rc, const u16 *samples, u32 count);
