@@ -38,6 +38,41 @@ static void check_header(u32 rate, u32 data_bytes)
 	assert(buf[44] == 0xAA);				/* exactly 44 bytes, nothing beyond */
 }
 
+/* RFC 4648's own vectors: the chunked fetch carries recordings as this encoding */
+static void test_base64(void)
+{
+	char out[64];
+
+	assert(recording_base64("", 0, out) == 0 && out[0] == 0);
+	assert(recording_base64("f", 1, out) == 4 && !strcmp(out, "Zg=="));
+	assert(recording_base64("fo", 2, out) == 4 && !strcmp(out, "Zm8="));
+	assert(recording_base64("foo", 3, out) == 4 && !strcmp(out, "Zm9v"));
+	assert(recording_base64("foob", 4, out) == 8 && !strcmp(out, "Zm9vYg=="));
+	assert(recording_base64("fooba", 5, out) == 8 && !strcmp(out, "Zm9vYmE="));
+	assert(recording_base64("foobar", 6, out) == 8 && !strcmp(out, "Zm9vYmFy"));
+}
+
+/* a recording's header read back: the rate and the size a playback UI needs; anything else is refused */
+static void test_wav_probe(void)
+{
+	unsigned char hdr[44];
+	u32 rate = 0, data = 0;
+
+	memset(hdr, 0, sizeof(hdr));
+	assert(recording_wav_header(hdr, 8000, 1234) == 44);
+	assert(recording_wav_probe(hdr, &rate, &data) == 0 && rate == 8000 && data == 1234);
+	assert(recording_wav_header(hdr, 16000, 987654u) == 44);
+	assert(recording_wav_probe(hdr, &rate, &data) == 0 && rate == 16000 && data == 987654u);
+	hdr[0] = 'X';
+	assert(recording_wav_probe(hdr, &rate, &data) == -EINVAL);
+	hdr[0] = 'R';
+	hdr[34] = 8;					/* not 16-bit */
+	assert(recording_wav_probe(hdr, &rate, &data) == -EINVAL);
+	hdr[34] = 16;
+	hdr[24] = 0x44; hdr[25] = 0xac; hdr[26] = 0; hdr[27] = 0;	/* 44100: not one of the bus's rates */
+	assert(recording_wav_probe(hdr, &rate, &data) == -EINVAL);
+}
+
 int main(void)
 {
 	/* both rates the PCM bus runs at, empty at the start of a call, one second of 8 kHz, and sizes past 16 bits */
@@ -47,6 +82,8 @@ int main(void)
 	check_header(16000, 32000);
 	check_header(8000, 12345678u);
 	check_header(16000, 0xABCDEFu);
+	test_base64();
+	test_wav_probe();
 
 	/* a rate the PCM bus never runs at is refused whole: 0 returned and not one byte written */
 	{

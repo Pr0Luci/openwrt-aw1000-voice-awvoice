@@ -380,6 +380,7 @@ static int reload(void)
 	config_load_forward(&d.forward, stdout);
 	config_load_book(&d.book, number_region_find(now.region), stdout);	/* between two steps: the core sees the new book whole */
 	d.api.at_interface = now.at_interface;
+	d.api.record_path = now.record_path;
 	phone_cfg_of(&now, &pc);
 	call_ops_of(&d);			/* caller id on or off takes hold at the next ring */
 	if (phone_set_cfg(d.phone, &pc))
@@ -764,7 +765,8 @@ int main(void)
 	phone_cfg_of(&d.cfg, &pc);
 	d.hooks = (struct phone_hooks){ .ctx = &d, .bridge_start = hook_bridge, .modem_level = hook_level, .event = hook_event, .call_ended = hook_call_ended, .wall_clock = hook_wall_clock };
 	d.api = (struct api_ctx){ .my_number = d.cfg.my_number, .channel = d.cfg.channel, .at_interface = d.cfg.at_interface,
-		.port = d.ans.port, .bridge_stats = api_bridge_stats, .reload = api_reload, .ctx = &d, .hd = d.cfg.hd };
+		.port = d.ans.port, .bridge_stats = api_bridge_stats, .reload = api_reload, .ctx = &d, .hd = d.cfg.hd,
+		.record_path = d.cfg.record_path };
 	indicator_init(&d.ind);
 	indicator_apply(&d.ind, d.cfg.led, 0, 0, stdout);
 	d.api.ind = &d.ind;

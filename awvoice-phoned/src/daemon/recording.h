@@ -13,10 +13,14 @@
  */
 #ifdef __KERNEL__
 #include <linux/types.h>
+#include <linux/string.h>
+#include <linux/errno.h>
 #else
+#include <errno.h>
 #include <stdint.h>
-typedef uint16_t u16;
+#include <string.h>
 typedef uint32_t u32;
+typedef uint16_t u16;
 #endif
 
 static inline void recording_put_le16(unsigned char *p, u32 v)
@@ -80,6 +84,55 @@ static inline u32 recording_prune_count(const u32 *bytes, u32 n, u32 budget)
 	while (deleted < n - 1 && total > budget)
 		total -= bytes[deleted++];
 	return deleted;
+}
+
+/* the recordings go to the page over ubus, whose replies are small: the bytes travel base64-encoded in chunks
+ * (RFC 4648, the standard alphabet with the padding). `out` needs 4 bytes for every 3 of `len`. */
+static inline u32 recording_base64(const void *in, u32 len, char *out)
+{
+	static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	const unsigned char *p = in;
+	u32 o = 0, k;
+
+	for (k = 0; k + 3 <= len; k += 3) {
+		u32 v = ((u32)p[k] << 16) | ((u32)p[k + 1] << 8) | p[k + 2];
+
+		out[o++] = alphabet[(v >> 18) & 63];
+		out[o++] = alphabet[(v >> 12) & 63];
+		out[o++] = alphabet[(v >> 6) & 63];
+		out[o++] = alphabet[v & 63];
+	}
+	if (len - k == 1) {
+		u32 v = (u32)p[k] << 16;
+
+		out[o++] = alphabet[(v >> 18) & 63];
+		out[o++] = alphabet[(v >> 12) & 63];
+		out[o++] = '=';
+		out[o++] = '=';
+	} else if (len - k == 2) {
+		u32 v = ((u32)p[k] << 16) | ((u32)p[k + 1] << 8);
+
+		out[o++] = alphabet[(v >> 18) & 63];
+		out[o++] = alphabet[(v >> 12) & 63];
+		out[o++] = alphabet[(v >> 6) & 63];
+		out[o++] = '=';
+	}
+	out[o] = 0;
+	return o;
+}
+
+/* read a recording's header back: the rate and the data size behind it. -EINVAL when the bytes are not one of ours. */
+static inline int recording_wav_probe(const void *hdr44, u32 *rate, u32 *data_bytes)
+{
+	const unsigned char *p = hdr44;
+
+	if (memcmp(p, "RIFF", 4) || memcmp(p + 8, "WAVE", 4) || memcmp(p + 12, "fmt ", 4) || memcmp(p + 36, "data", 4))
+		return -EINVAL;
+	if (p[20] != 1 || p[21] != 0 || p[22] != 1 || p[23] != 0 || p[34] != 16 || p[35] != 0)
+		return -EINVAL;			/* not 16-bit mono PCM */
+	*rate = (u32)p[24] | ((u32)p[25] << 8) | ((u32)p[26] << 16) | ((u32)p[27] << 24);
+	*data_bytes = (u32)p[40] | ((u32)p[41] << 8) | ((u32)p[42] << 16) | ((u32)p[43] << 24);
+	return (*rate == 8000 || *rate == 16000) && *data_bytes % 2 == 0 ? 0 : -EINVAL;
 }
 
 #endif /* AW_PHONED_RECORDING_H */
