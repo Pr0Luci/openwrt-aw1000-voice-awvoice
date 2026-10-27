@@ -339,7 +339,7 @@ static int m_recordings(struct ubus_context *ctx, struct ubus_object *obj, struc
 				blobmsg_add_u32(&reply_buf, "bytes", data + 44);
 				blobmsg_add_u32(&reply_buf, "rate", rate);
 				blobmsg_add_u32(&reply_buf, "channels", channels);
-				blobmsg_add_u32(&reply_buf, "seconds", rate ? data / rate / channels : 0);
+				blobmsg_add_u32(&reply_buf, "seconds", rate ? data / rate / channels / 2 : 0);	/* two bytes a sample */
 				blobmsg_close_table(&reply_buf, entry);
 			}
 		}
