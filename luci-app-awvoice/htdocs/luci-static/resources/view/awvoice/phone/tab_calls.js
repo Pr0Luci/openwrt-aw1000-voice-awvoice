@@ -87,7 +87,6 @@ var recList = null, recBusy = null, recPlaying = null, recAudio = null, recUrl =
 
 /* a recording belongs to the call whose id and start time its name carries */
 function recFor(c) {
-	console.log('[recFor] id=' + c.id + ' c.recording=' + JSON.stringify(c.recording) + ' recList=' + (recList ? recList.length : 'null'));
 	if (!recList || !c.recording)
 		return null;
 	for (var k = 0; k < recList.length; k++)
@@ -162,12 +161,12 @@ function recPlayPause(ctx, rec) {
 	});
 }
 
-function recSave(ctx, rec, btn) {
+/* the file travels as a browser download; the card redraws on every state change, so the busy flag alone guards it */
+function recSave(ctx, rec) {
 	if (recBusy === rec.name)
 		return;
 	recBusy = rec.name;
 	if (recNotify) recNotify();
-	btn.disabled = true;
 	recFetchAll(ctx, rec).then(function(wav) {
 		recUrl = URL.createObjectURL(new Blob(wav.parts, { type: 'audio/wav' }));
 		var a = E('a', { 'href': recUrl, 'download': rec.name });
@@ -176,11 +175,9 @@ function recSave(ctx, rec, btn) {
 		a.remove();
 		setTimeout(function() { URL.revokeObjectURL(recUrl); }, 1000);
 		recBusy = null;
-		btn.disabled = false;
 		if (recNotify) recNotify();
 	}, function(e) {
 		recBusy = null;
-		btn.disabled = false;
 		if (recNotify) recNotify();
 		ctx.toast(e.message);
 	});
@@ -403,7 +400,18 @@ return baseclass.extend({
 		from.addEventListener('change', redraw);
 		ctx.on('contacts', redraw);
 		ctx.on('select', function(id) { sel = id; redraw(); });
-		ctx.on('calls', redraw);
+		/* a recording file lands on the storage when its call ends: when the reloaded log carries
+		 * one this tab has not seen, refetch the list first so the detail card links it at once */
+		ctx.on('calls', function() {
+			var fresh = ctx.calls.some(function(c) {
+				return c.recording && !(recList || []).some(function(r) {
+					return r.name.replace(/\.wav$/, '') === c.recording.replace(/\.wav$/, '');
+				});
+			});
+			if (fresh)
+				recRefresh(ctx).then(redraw, redraw);
+			redraw();
+		});
 		ctx.on('recordings', redraw);
 		recNotify = function() { redraw(); };
 		recRefresh(ctx);
