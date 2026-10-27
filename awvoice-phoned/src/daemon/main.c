@@ -310,8 +310,11 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 				if (saved >= 0)
 					printf("the recording goes on in a new file after the rate change (%lld bytes kept)\n", saved);
 				d.rec_rate = phone_hd_active(d.phone) && d.cfg.hd ? 16000 : 8000;
-				snprintf(d.rec_name, sizeof(d.rec_name), "%lld-%u", api_epoch_s(now, now), d.rec_call_id);
-				if (recorder_start(&d.rec, d.cfg.record_path, d.rec_name, (u32)d.rec_rate, 2)) {
+				snprintf(d.rec_name, sizeof(d.rec_name), "%lld-%u.wav", api_epoch_s(now, now), d.rec_call_id);
+				char base2[sizeof(d.rec_name)];
+
+				snprintf(base2, sizeof(base2), "%.*s", (int)strlen(d.rec_name) - 4, d.rec_name);
+				if (recorder_start(&d.rec, d.cfg.record_path, base2, (u32)d.rec_rate, 2)) {
 					dev_tap_set(&d.dev, 0);
 					d.rec_armed = 0;
 					break;
@@ -482,7 +485,11 @@ static void hook_call_ended(void *ctx, const struct phone_call_record *rec)
 {
 	struct daemon *dm = ctx;
 
-	calllog_add(&dm->calls, rec, api_epoch_s(rec->start_ms, mono_ms()));
+	/* the recording belongs to this call only when it was this call's tap that armed it
+	 * (the ids are the core's own, so the match is exact) */
+	const char *rec_name = dm->rec_call_id == rec->id && dm->rec_name[0] ? dm->rec_name : NULL;
+
+	calllog_add(&dm->calls, rec, api_epoch_s(rec->start_ms, mono_ms()), rec_name);
 }
 
 /* ---- call recording (awvoice.record.*): the files' names hold an epoch and the call's id, never a number ------------- */
@@ -534,12 +541,16 @@ static void record_call_event(struct daemon *dm, const struct phone_event *ev)
 	if (ev->call == CALL_ACTIVE && !dm->rec.open) {
 		record_prune(dm->cfg.record_path, dm->cfg.record_max_mb);
 		dm->rec_rate = phone_hd_active(dm->phone) && dm->cfg.hd ? 16000 : 8000;
-		snprintf(dm->rec_name, sizeof(dm->rec_name), "%lld-%u",
+		snprintf(dm->rec_name, sizeof(dm->rec_name), "%lld-%u.wav",
 			api_epoch_s(ev->at_ms, mono_ms()), ev->call_id);
 		dm->rec_call_id = ev->call_id;
 		err = dev_tap_set(&dm->dev, 1);
-		if (!err)
-			err = recorder_start(&dm->rec, dm->cfg.record_path, dm->rec_name, (u32)dm->rec_rate, 2);
+		if (!err) {
+			char base[sizeof(dm->rec_name)];
+
+			snprintf(base, sizeof(base), "%.*s", (int)strlen(dm->rec_name) - 4, dm->rec_name);
+			err = recorder_start(&dm->rec, dm->cfg.record_path, base, (u32)dm->rec_rate, 2);
+		}
 		if (err) {
 			dev_tap_set(&dm->dev, 0);
 			printf("the call was not recorded: %s\n", strerror(-err));

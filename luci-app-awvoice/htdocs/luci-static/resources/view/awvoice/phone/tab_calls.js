@@ -87,13 +87,12 @@ var recList = null, recBusy = null, recPlaying = null, recAudio = null, recUrl =
 
 /* a recording belongs to the call whose id and start time its name carries */
 function recFor(c) {
-	if (!recList)
+	console.log('[recFor] id=' + c.id + ' c.recording=' + JSON.stringify(c.recording) + ' recList=' + (recList ? recList.length : 'null'));
+	if (!recList || !c.recording)
 		return null;
-	for (var k = 0; k < recList.length; k++) {
-		var m = /^(\d+)-\d+\.wav$/.exec(recList[k].name);
-		if (m && Math.abs(+m[1] - (c.ts || 0)) < 120)
+	for (var k = 0; k < recList.length; k++)
+		if (recList[k].name.replace(/\.wav$/, '') === c.recording.replace(/\.wav$/, ''))
 			return recList[k];
-	}
 	return null;
 }
 
