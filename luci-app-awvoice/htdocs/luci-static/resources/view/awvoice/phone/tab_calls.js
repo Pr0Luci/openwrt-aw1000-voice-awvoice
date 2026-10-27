@@ -173,16 +173,40 @@ return baseclass.extend({
 			});
 		}
 
+		/* the whole WAV - header and samples - to the computer's downloads: the browser saves it as the file's own name */
+		function download(rec, btn) {
+			btn.disabled = true;
+			btn.lastChild.textContent = _('Loading…');
+			fetchAll(rec).then(function(wav) {
+				var dataBytes = wav.parts.reduce(function(a, p) { return a + p.length; }, 0);
+				var url = URL.createObjectURL(new Blob([ wavHeader(wav.rate, dataBytes) ].concat(wav.parts), { type: 'audio/wav' }));
+				var a = E('a', { 'href': url, 'download': rec.name });
+
+				document.body.appendChild(a);
+				a.click();
+				a.remove();
+				setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+				btn.disabled = false;
+				btn.lastChild.textContent = _('Save');
+			}, function(e) {
+				btn.disabled = false;
+				btn.lastChild.textContent = _('Save');
+				ctx.toast(e.message);
+			});
+		}
+
 		/* when it was recorded, how long and how big, then the play and delete controls */
 		function rowNode(rec) {
 			var ts = recWhen(rec.name);
 			var playBtn = u.button(_('Play'), 'play', '', function() { play(rec, playBtn); });
+			var saveBtn = u.button(_('Save'), 'download', '', function() { download(rec, saveBtn); });
 			return E('div', { 'class': 'av-it' }, [
 				E('div', { 'class': 't' }, [
 					ts != null ? u.fmtWhen(ts) : rec.name.replace(/\.wav$/, ''),
 					E('small', { 'class': 'av-mono' }, u.fmtDuration(rec.seconds) + ' - ' + fmtSize(rec.bytes))
 				]),
 				playBtn,
+				saveBtn,
 				u.iconButton(_('Delete recording'), 'trash', function() { remove(rec); }, 'cbi-button-remove')
 			]);
 		}
