@@ -75,18 +75,19 @@ for p in awvoice-phoned kmod-awvoice-fxs luci-app-awvoice; do
 done
 
 say "checking the packages"
-list_apks() { find bin/packages -type f -name '*.apk' | sort; }
-count=$(find bin/packages \( -name 'awvoice-phoned-*.apk' -o -name 'kmod-awvoice-fxs-*.apk' -o -name 'luci-app-awvoice-*.apk' \) -type f | wc -l | tr -d ' ')
-[ "$count" = 3 ] || { list_apks >&2; die "bin/packages holds $count of the three apks, expected 3"; }
-apk_phoned=$(find bin/packages -type f -name "awvoice-phoned-$ver-r1.apk" | head -n 1)
-apk_kmod=$(find bin/packages -type f -name "kmod-awvoice-fxs-$KERNEL.$ver-r1.apk" | head -n 1)
-apk_luci=$(find bin/packages -type f -name "luci-app-awvoice-$ver-r1.apk" | head -n 1)
+# kernel modules land in bin/targets/<target>/kmods, the other two in bin/packages
+list_apks() { find bin -type f -name '*.apk' | sort; }
+count=$(find bin \( -name 'awvoice-phoned-*.apk' -o -name 'kmod-awvoice-fxs-*.apk' -o -name 'luci-app-awvoice-*.apk' \) -type f | wc -l | tr -d ' ')
+[ "$count" = 3 ] || { list_apks >&2; die "bin holds $count of the three apks, expected 3"; }
+apk_phoned=$(find bin -type f -name "awvoice-phoned-$ver-r1.apk" | head -n 1)
+apk_kmod=$(find bin -type f -name "kmod-awvoice-fxs-$KERNEL.$ver-r1.apk" | head -n 1)
+apk_luci=$(find bin -type f -name "luci-app-awvoice-$ver-r1.apk" | head -n 1)
 [ -n "$apk_phoned" ] || { list_apks >&2; die "no awvoice-phoned-$ver-r1.apk was built"; }
 [ -n "$apk_kmod" ] || { list_apks >&2; die "no kmod-awvoice-fxs-$KERNEL.$ver-r1.apk was built"; }
 [ -n "$apk_luci" ] || { list_apks >&2; die "no luci-app-awvoice-$ver-r1.apk was built"; }
 
-ko=$(find build_dir -type f -name 'awvoice-fxs.ko' | head -n 1)
-[ -n "$ko" ] || die "the built awvoice-fxs.ko is missing"
+ko=$(find build_dir -type f -name 'awvoice_fxs.ko' | head -n 1)
+[ -n "$ko" ] || die "the built awvoice_fxs.ko is missing"
 magic=$(modinfo -F vermagic "$ko")
 case "$magic" in
 "$KERNEL "*) ;;
@@ -94,14 +95,14 @@ case "$magic" in
 esac
 file "$ko" | grep -q 'ARM aarch64' || die "the module is not an aarch64 object"
 
-bin=$(find build_dir -type f -path '*/.pkgdir/awvoice-phoned/usr/sbin/awvoice-phoned' | head -n 1)
-[ -n "$bin" ] || die "the packaged awvoice-phoned binary is missing"
-file "$bin" | grep -q 'ARM aarch64' || die "the daemon is not an aarch64 object"
-needed=$(readelf -d "$bin" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p')
+dbin=$(find build_dir -type f -path '*/.pkgdir/awvoice-phoned/usr/sbin/awvoice-phoned' | head -n 1)
+[ -n "$dbin" ] || die "the packaged awvoice-phoned binary is missing"
+file "$dbin" | grep -q 'ARM aarch64' || die "the daemon is not an aarch64 object"
+needed=$(readelf -d "$dbin" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p')
 [ -n "$needed" ] || die "the daemon has no NEEDED entries"
 for lib in $needed; do
 	case "$lib" in
-	libc.so.*|libubox.so.*|libubus.so.*|libuci.so.*|libgcc_s.so.*) ;;
+	libc.so|libc.so.*|libubox.so|libubox.so.*|libubus.so|libubus.so.*|libuci.so|libuci.so.*|libgcc_s.so|libgcc_s.so.*) ;;
 	*) die "the daemon needs $lib, outside the allowed set" ;;
 	esac
 done
