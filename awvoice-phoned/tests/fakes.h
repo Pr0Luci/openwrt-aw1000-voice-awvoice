@@ -33,6 +33,7 @@ struct model {
 	int user[2], step[2], pending[2];	/* pending: data bytes were written since the last RAM access */
 	int writes_ram;
 	uint8_t id;
+	uint8_t mstrstat;	/* the chip's ready state the reads report; the tests force another value for the dead-chip start */
 	int ram_sticks;		/* 0: RAM refuses to hold values */
 	int frames;
 	unsigned int ram_write_addr[2][64], ram_write_count[2];

@@ -32,6 +32,8 @@ int stage0_identify(struct chip *c, FILE *log)
 	if (err)
 		return fail_stage(log, "read master status", 0, err);
 	fprintf(log, "  master status 0x%02x\n", status);
+	if (status != MSTRSTAT_RUNNING)
+		return fail_stage(log, "the chip is not in its running state: its own firmware did not start - the chip's flash may need the original firmware once to provision it", 0, -ENODEV);
 
 	/* a register with no side effect: write a pattern, read it back, put the old value back */
 	for (ch = 0; ch < CHANNELS; ch++) {

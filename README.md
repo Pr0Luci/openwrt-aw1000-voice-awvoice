@@ -42,7 +42,7 @@ No SIP, no Asterisk, no second number — the cellular network is the exchange a
 
 The line chip needs this board's own settings (line voltages, ringing, tones, impedances, the init sequence). A ready board file ships with the `awvoice-phoned` package and the first service start installs it at `/etc/awvoice/board.bin` — a file already there (yours, kept across upgrades) is never overwritten. If you prefer to derive your own from your router's original firmware, the same file format is produced by `tools/provision/awvoice-board-extract.py` with the section map in `tools/provision/aw1000.map`.
 
-Note on the chip's firmware: the chip runs on the firmware built into it. This port uses **no DSP patch file** — none is needed, and none ships.
+Note on the chip's firmware: the chip runs on the firmware built into it. This port uses **no DSP patch file** — none is needed, and none ships. The port never uploads or redistributes a proprietary binary: the line chip's ready state is checked at every service start, and if a unit's chip did not come up the service stops with that cause in the log instead of a silent dead line.
 
 ## Building
 
