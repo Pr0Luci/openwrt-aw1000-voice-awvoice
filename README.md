@@ -4,6 +4,10 @@ Plug an ordinary desk phone into the AW1000's RJ11 socket and make and take the 
 
 No SIP, no Asterisk, no second number — the cellular network is the exchange and the SIM's number is the line's number. Everything it needs ships in the packages: install, enable, dial. The daemon talks to the modem's AT port directly, with no extra modem software in between, and there is no cloud and no account — everything runs on the router.
 
+## What's new
+
+- Call recordings: answered calls land on the router as WAV files and the call log links each call to its own recording — play, save or delete it from the call's card on the Calls tab. Stereo (the caller and the handset on separate channels), 16 kHz with HD voice, opt-in from the Settings tab with a size budget for the storage. The files never carry a phone number.
+
 ## What it does
 
 - Calls both ways: dial (tone), ring, answer, hang-up, hook-flash (R), call waiting with hold and swap.
@@ -80,10 +84,6 @@ cd packages/awvoice-phoned && make -f Makefile.host test
 ## Under the hood
 
 A thin kernel module owns the line chip's register bus, the PCM block and a hardware ring watchdog: if the phone service ever stops, the chip is back in reset within milliseconds — the phone never rings forever and the line never stays live. All the line logic sits in one daemon on a single 5 millisecond clock, and the whole core builds and runs on an ordinary computer without the hardware (`make -f Makefile.host test` in each package).
-
-## What's new
-
-- Call recordings: answered calls land on the router as WAV files and the call log links each call to its own recording — play, save or delete it from the call's card on the Calls tab. Stereo (the caller and the handset on separate channels), 16 kHz with HD voice, opt-in from the Settings tab with a size budget for the storage. The files never carry a phone number.
 
 ## Licence
 
