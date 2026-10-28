@@ -1,0 +1,68 @@
+name: release
+
+# A tag builds the three packages and puts them in a draft release. The draft is
+# published by hand, after the packages are installed on the router and the
+# calls are checked; nothing on a tag run is downloadable before that.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  draft:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is VERSION
+        run: |
+          set -eu
+          want="v$(cat VERSION)"
+          [ "$GITHUB_REF_NAME" = "$want" ] || { echo "the tag $GITHUB_REF_NAME is not $want"; exit 1; }
+          scripts/version.sh check
+      - name: Restore the SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/awvoice-sdk
+          key: sdk-${{ hashFiles('scripts/sdk.sha256') }}
+      - name: Build
+        run: scripts/build.sh
+      - name: Create or refresh the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          ver="${tag#v}"
+          cat > notes.md <<NOTES
+          AWvoice $ver for the Arcadyan AW1000 (OpenWrt 25.12.5, kernel 6.12.94, aarch64).
+
+          The three packages of this release, all from the same build:
+
+          - awvoice-phoned $ver-r1: the phone daemon.
+          - kmod-awvoice-fxs 6.12.94.$ver-r1: the line-chip module, built for kernel 6.12.94.
+          - luci-app-awvoice $ver-r1: the LuCI page (Services - AWvoice(RJ11)). It moves
+            from 0.1.0 to $ver with this release, so one number names the whole set.
+
+          Install all three from this release, then reboot: the module and the daemon are
+          a matched pair, and a module that is already loaded stays loaded until a reboot.
+
+              apk add --allow-untrusted awvoice-phoned-*.apk kmod-awvoice-fxs-*.apk luci-app-awvoice-*.apk
+              reboot
+
+          The packages are not signed yet, hence --allow-untrusted. SHA256SUMS holds their
+          checksums; build-info.txt names the commit and the SDK the build came from.
+
+          Known issue: caller id on some handsets does not arrive (see the open caller-id issue).
+          NOTES
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+            gh release edit "$tag" --notes-file notes.md
+          else
+            gh release create "$tag" dist/* --draft --title "AWvoice $ver" --notes-file notes.md
+          fi

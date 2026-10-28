@@ -25,20 +25,24 @@ static const char *log_text(FILE *f)
 	return log_buf ? log_buf : "";
 }
 
-/* a number option: the edges are taken, one step outside either edge is refused and leaves the default */
+/* a number option: the edges are taken, one step outside either edge is refused and leaves the default.
+ * the callers' log stream stays open while this runs, so each rig owns its own buffer */
 static void edge(const char *name, unsigned int low, unsigned int high, unsigned int (*get)(const struct aw_config *))
 {
 	struct aw_config c, ref;
-	char text[16];
-	FILE *f = log_open();
+	char text[16], *log = NULL;
+	size_t len = 0;
+	FILE *f = open_memstream(&log, &len);
 
+	assert(f);
 	config_defaults(&ref);
 	config_defaults(&c);
 	snprintf(text, sizeof(text), "%u", low);
 	assert(config_set(&c, name, text, f) == 0 && get(&c) == low);
 	snprintf(text, sizeof(text), "%u", high);
 	assert(config_set(&c, name, text, f) == 0 && get(&c) == high);
-	assert(!*log_text(f));
+	fflush(f);
+	assert(!log || !*log);
 	config_defaults(&c);
 	if (low) {
 		snprintf(text, sizeof(text), "%u", low - 1);
@@ -51,9 +55,11 @@ static void edge(const char *name, unsigned int low, unsigned int high, unsigned
 	assert(config_set(&c, name, "-1", f) == -EINVAL && get(&c) == get(&ref));
 	assert(config_set(&c, name, " 7", f) == -EINVAL && get(&c) == get(&ref));
 	assert(config_set(&c, name, "99999999999999999999", f) == -EINVAL && get(&c) == get(&ref));
-	/* one line per refusal, naming the option and never the value */
-	assert(strstr(log_text(f), name) && !strstr(log_text(f), "12x") && !strstr(log_text(f), "99999"));
+	/* one line per refusal, naming the option and never the value (the flush moves the buffer) */
+	fflush(f);
+	assert(log && strstr(log, name) && !strstr(log, "12x") && !strstr(log, "99999"));
 	fclose(f);
+	free(log);			/* the close may move the buffer: free the pointer it leaves */
 }
 
 static unsigned int get_enabled(const struct aw_config *c) { return (unsigned int)c->enabled; }

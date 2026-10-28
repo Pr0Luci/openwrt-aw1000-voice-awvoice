@@ -1,0 +1,51 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      artifacts:
+        description: "Upload the built packages so they can be tried on the router before a tag (any signed-in GitHub user can download them)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: The three suites
+        run: scripts/test.sh
+
+  packages:
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/awvoice-sdk
+          key: sdk-${{ hashFiles('scripts/sdk.sha256') }}
+      - name: Build the three packages
+        run: scripts/build.sh
+      - name: Show the build
+        run: cat dist/build-info.txt
+      - name: Upload the packages
+        if: inputs.artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: awvoice-${{ github.run_id }}
+          path: dist/
+          retention-days: 14

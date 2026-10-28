@@ -66,6 +66,17 @@ make -j$(nproc)
 
 Or copy the three package directories at the repository root into the build tree's `package/` directory instead.
 
+## Prebuilt packages
+
+Every release carries the three packages, their checksums and a short build record. Install all three from the same release, then reboot — the module and the daemon are a matched pair, and a module that is already loaded stays loaded until a reboot:
+
+```
+apk add --allow-untrusted awvoice-phoned-*.apk kmod-awvoice-fxs-*.apk luci-app-awvoice-*.apk
+reboot
+```
+
+The module is built for kernel 6.12.94 (OpenWrt 25.12.5) on aarch64; its package depends on that exact kernel build, so `apk` refuses it on another kernel instead of leaving a module behind that cannot load. `SHA256SUMS` in the release has the checksums and `build-info.txt` the commit and the SDK the packages came from. The packages are not signed, hence `--allow-untrusted`.
+
 ## Installing
 
 Install the three packages on the router, then enable the service and turn the phone on:
