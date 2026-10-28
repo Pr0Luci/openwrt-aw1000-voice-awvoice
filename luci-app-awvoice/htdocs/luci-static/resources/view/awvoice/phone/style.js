@@ -84,6 +84,12 @@ var CSS = [
 'border-radius:9px;background:var(--av-err);color:#fff;font-size:11px;font-weight:600}',
 '.avp .av-badge[hidden]{display:none}',
 '.avp .av-note{margin:8px 0 0;color:var(--av-mut);font-size:12px}',
+/* the recording controls' busy state: the icon hides and a ring spins in its place */
+'.avp .av-busy svg{display:none}',
+'.avp .av-busy::after{content:\'\';display:inline-block;width:11px;height:11px;margin:0 6px 0 2px;',
+'\tborder:2px solid currentColor;border-right-color:transparent;border-radius:50%;vertical-align:-2px;',
+'\tanimation:av-rot .7s linear infinite}',
+'@keyframes av-rot{to{transform:rotate(360deg)}}',
 
 /* buttons, chips, filter bar */
 '.avp .av-chip{min-height:var(--av-chip)}',

@@ -53,10 +53,10 @@ static void test_add_and_types(void)
 	struct phone_call_record b = rec(PHONE_DIR_IN, PHONE_RES_BLOCKED, "5553", 0, 9000, 0);
 	struct phone_call_record o = rec(PHONE_DIR_OUT, PHONE_RES_BUSY, "45", 0, 9000, 17);
 
-	calllog_add(l, &a, 1000);
-	calllog_add(l, &m, 1100);
-	calllog_add(l, &b, 1200);
-	calllog_add(l, &o, 1300);
+	calllog_add(l, &a, 1000, NULL);
+	calllog_add(l, &m, 1100, NULL);
+	calllog_add(l, &b, 1200, NULL);
+	calllog_add(l, &o, 1300, NULL);
 	assert(l->n == 4 && l->next_id == 5);
 	/* newest first, ids rise */
 	assert(l->e[0].id == 4 && l->e[3].id == 1);
@@ -77,7 +77,7 @@ static void test_cap(void)
 	unsigned int k;
 
 	for (k = 0; k < CALLLOG_MAX + 5; k++)
-		calllog_add(l, &a, k);
+		calllog_add(l, &a, k, NULL);
 	assert(l->n == CALLLOG_MAX);
 	assert(l->e[0].id == CALLLOG_MAX + 5 && l->e[CALLLOG_MAX - 1].id == 6);	/* the oldest five are gone */
 	free(l);
@@ -91,10 +91,10 @@ static void test_delete(void)
 	struct phone_call_record o = rec(PHONE_DIR_OUT, PHONE_RES_FAILED, "3", 0, 0, 0);
 	enum calllog_type t;
 
-	calllog_add(l, &a, 1);
-	calllog_add(l, &m, 2);
-	calllog_add(l, &o, 3);
-	calllog_add(l, &m, 4);
+	calllog_add(l, &a, 1, NULL);
+	calllog_add(l, &m, 2, NULL);
+	calllog_add(l, &o, 3, NULL);
+	calllog_add(l, &m, 4, NULL);
 	l->ram_dirty = l->flash_dirty = 0;
 	t = CALLLOG_MISS;
 	assert(calllog_delete(l, &t) == 2 && l->n == 2 && l->ram_dirty && l->flash_dirty);
@@ -104,7 +104,7 @@ static void test_delete(void)
 	assert(calllog_delete(l, NULL) == 2 && l->n == 0);
 	assert(calllog_delete(l, NULL) == 0);
 	/* the ids keep rising after a delete */
-	calllog_add(l, &a, 5);
+	calllog_add(l, &a, 5, NULL);
 	assert(l->e[0].id == 5);
 	assert(calllog_type_parse("OUT", &t) == 0 && t == CALLLOG_OUT);
 	assert(calllog_type_parse("out", &t) == -EINVAL && calllog_type_parse("", &t) == -EINVAL && calllog_type_parse(NULL, &t) == -EINVAL);
@@ -138,19 +138,20 @@ static void test_files(void)
 
 	fresh_dir();
 	l = new_log(0);
-	calllog_add(l, &a, 1700000000ull);
-	calllog_add(l, &o, 1700000100ull);
+	calllog_add(l, &a, 1700000000ull, NULL);
+	calllog_add(l, &o, 1700000100ull, "1700000100-9.wav");
 	/* the RAM copy is written at once (the directory is made), the flash copy only when its interval is over */
 	assert(calllog_persist(l, 5000, 0) == 0);
 	assert(slurp(ram) && !slurp(flash) && !l->ram_dirty && l->flash_dirty);
 	snprintf(tmp, sizeof(tmp), "%s.tmp", ram);
 	assert(access(tmp, F_OK) != 0);					/* the temporary name is gone: the write was a rename */
 	assert(stat(ram, &sb) == 0 && (sb.st_mode & 0777) == 0600);
-	assert(strstr(slurp(ram), "{\"id\":2,\"type\":\"OUT\",\"number\":\"45\",\"ts\":1700000100,\"durationSec\":0,\"result\":\"busy\",\"cause\":17},"));
+	assert(strstr(slurp(ram), "{\"id\":2,\"type\":\"OUT\",\"number\":\"45\",\"ts\":1700000100,\"durationSec\":0,\"result\":\"busy\",\"cause\":17,\"recording\":\"1700000100-9.wav\"},"));
+	assert(strstr(slurp(ram), "\"recording\":\"1700000100-9.wav\""));	/* the recording rides the entry that owns it */
 	assert(calllog_persist(l, CALLLOG_FLASH_MS - 1, 0) == 0 && !slurp(flash));
 	assert(calllog_persist(l, CALLLOG_FLASH_MS, 0) == 0 && slurp(flash) && !l->flash_dirty);
 	/* a new call after a flash write waits for the next interval, but a final write goes at once */
-	calllog_add(l, &a, 1700000200ull);
+	calllog_add(l, &a, 1700000200ull, NULL);
 	assert(calllog_persist(l, CALLLOG_FLASH_MS + 10, 0) == 0);
 	assert(strstr(slurp(ram), "\"id\":3") && !strstr(slurp(flash), "\"id\":3") && l->flash_dirty);
 	assert(calllog_persist(l, CALLLOG_FLASH_MS + 20, 1) == 0 && strstr(slurp(flash), "\"id\":3"));
@@ -161,6 +162,7 @@ static void test_files(void)
 	assert(calllog_load(back, log) == 0 && back->n == 3 && back->next_id == 4);
 	assert(back->e[0].id == 3 && !strcmp(back->e[1].number, "45") && back->e[1].result == PHONE_RES_BUSY && back->e[1].cause == 17);
 	assert(back->e[2].duration_s == 65 && back->e[2].ts == 1700000000ull && back->e[2].type == CALLLOG_IN);
+	assert(!strcmp(back->e[1].recording, "1700000100-9.wav") && !back->e[2].recording[0]);	/* the name round-trips, the absent stays absent */
 	assert(!back->ram_dirty && !back->flash_dirty);
 	/* after a reboot only the flash copy is there */
 	unlink(ram);
@@ -226,7 +228,7 @@ static void test_damaged(void)
 
 		fresh_dir();
 		w = new_log(0);
-		calllog_add(w, &a, 7);
+		calllog_add(w, &a, 7, NULL);
 		assert(calllog_persist(w, 0, 1) == 0);
 		snprintf(badpath, sizeof(badpath), "%s/run", dir);
 		mkdir(badpath, 0700);
@@ -247,7 +249,7 @@ static void test_unwritable(void)
 	l = new_log(0);
 	snprintf(ram, sizeof(ram), "%s/missing/deeper/calls.json", dir);
 	l->ram_path = ram;
-	calllog_add(l, &a, 1);
+	calllog_add(l, &a, 1, NULL);
 	assert(calllog_persist(l, 0, 0) != 0 && l->ram_dirty);		/* stays dirty: tried again */
 	free(l);
 }

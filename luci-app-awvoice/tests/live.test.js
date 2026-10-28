@@ -63,16 +63,19 @@ async function main() {
 	t = makeProvider({ replies: { 'awvoice.health': {} } });
 	assert.deepStrictEqual((await t.p.getHealth()).log.tail, []);
 
-	// the call log: the daemon's name comes through ('' when it gave none), the number as it came
+	// the call log: the daemon's name comes through ('' when it gave none), the number as it came, and the
+	// recording's file name travels ('' when the daemon gave none: an old daemon's reply has no field at all)
 	t = makeProvider({ replies: { 'awvoice.calls': { calls: [
-		{ id: 3, type: 'IN', number: '+12345', name: 'Ann', ts: 1700000000, durationSec: 12, result: 'answered', cause: 0 },
+		{ id: 3, type: 'IN', number: '+12345', name: 'Ann', ts: 1700000000, durationSec: 12, result: 'answered', cause: 0, recording: '1700000000-3.wav' },
 		{ id: 2, type: 'MISS', number: '1777', ts: 1700000100, durationSec: 0, result: 'missed', cause: 0 } ] } } });
 	let calls = await t.p.listCalls();
 	assert.strictEqual(calls.length, 2);
 	assert.strictEqual(calls[0].name, 'Ann');
 	assert.strictEqual(calls[0].number, '+12345');
+	assert.strictEqual(calls[0].recording, '1700000000-3.wav');
 	assert.strictEqual(calls[1].name, '');
 	assert.strictEqual(calls[1].type, 'MISS');
+	assert.strictEqual(calls[1].recording, '');
 
 	// settings: defaults for what is unset, ringback 1/0 as on/off, out-of-range values fall back
 	t = makeProvider({ replies: {}, uci: { ringback: '0', flash_min_ms: '5', at_interface: '3', earpiece_volume: '4' } });

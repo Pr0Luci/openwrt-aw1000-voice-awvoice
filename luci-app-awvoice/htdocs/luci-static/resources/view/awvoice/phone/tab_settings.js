@@ -5,9 +5,9 @@
 'require view.awvoice.phone.editors as editors';
 
 /*
- * tab_settings.js - Phone settings tab: line, tones, audio, features, speed dial, indicator and advanced options.
- * Edits are held in the form and written with "Save and apply"; "Reset" discards them. Fields whose daemon support is
- * a later milestone are shown disabled with a "Not available yet" tag (api.settingsLive says which are live).
+ * tab_settings.js - Phone settings tab: line, tones, audio, features, recording, speed dial, indicator and advanced
+ * options. Edits are held in the form and written with "Save and apply"; "Reset" discards them. Fields whose daemon
+ * support is a later milestone are shown disabled with a "Not available yet" tag (api.settingsLive says which are live).
  */
 
 var NUMBER_RE = editors.NUMBER_RE;
@@ -46,11 +46,17 @@ return baseclass.extend({
 		var hotDelay = num('hot', 3, 99, _('Hotline delay in seconds'));
 		var led = u.select([ [ '', _('None') ] ], '');
 
-	var rxGain = num('rx', 0, 65535, _('Modem receive gain'));
-	var usb = num('usb', 0, 9, _('Modem USB interface'));
-	var ringRate = num('rr', 100, 3000, _('Call-blink rate in milliseconds'));
-	var offhookRate = num('or', 200, 10000, _('Off-hook blink rate in milliseconds'));
-	var refresh = u.select(REFRESH_STEPS.map(function(n) { return [ String(n), n === 1 ? _('1 second (live)') : _('%d seconds').format(n) ]; }), '1');
+var rxGain = num('rx', 0, 65535, _('Modem receive gain'));
+var usb = num('usb', 0, 9, _('Modem USB interface'));
+var ringRate = num('rr', 100, 3000, _('Call-blink rate in milliseconds'));
+var offhookRate = num('or', 200, 10000, _('Off-hook blink rate in milliseconds'));
+var refresh = u.select(REFRESH_STEPS.map(function(n) { return [ String(n), n === 1 ? _('1 second (live)') : _('%d seconds').format(n) ]; }), '1');
+
+/* the recordings: kept on the router's storage, listed on the Calls tab */
+var recEnabled = u.checkbox(false, _('Record phone calls'));
+var recPath = u.text('', '/etc/awvoice/recordings', 'av-mono wide');
+var recMax = num('recmax', 1, 4095, _('Recording budget in megabytes'));
+var recUsage = E('span', { 'class': 'av-mono' }, '');
 
 	/* the FSK variants carry the timing choice; DTMF has its own placement (it goes out while the phone rings) */
 	function fskPicked() {
@@ -110,6 +116,38 @@ return baseclass.extend({
 			}, function(e) { err.textContent = e.message; });
 		}
 
+		function loadRec() {
+			return ctx.api.getRecordingSettings().then(function(s) {
+				recEnabled.set(s.enabled);
+				recPath.value = s.path;
+				recMax.value = String(s.maxMb);
+			}, function(e) { err.textContent = err.textContent || e.message; });
+		}
+
+		function recRefreshUsage() {
+			return ctx.api.listRecordings().then(function(list) {
+				var bytes = list.reduce(function(a, r) { return a + r.bytes; }, 0);
+				recUsage.textContent = list.length ?
+					_('%d recordings, %s MB on the storage').format(list.length, (bytes / 1048576).toFixed(1)) : _('No recordings on the storage.');
+				return list;
+			});
+		}
+
+		function recDeleteAll() {
+			return recRefreshUsage().then(function(list) {
+				if (!list.length)
+					return;
+				editors.confirm(ctx, _('Delete all recordings'),
+					_('Delete all %d recordings? This cannot be undone.').format(list.length), _('Delete all'),
+					function() {
+						return Promise.all(list.map(function(r) { return ctx.api.deleteRecording(r.name); })).then(function() {
+							ctx.toast(_('Recordings deleted'));
+							recRefreshUsage();
+						}, function(e) { ctx.toast(e.message); });
+					});
+			});
+		}
+
 		function optInt(el) {
 			var v = String(el.value).trim();
 			return v === '' ? null : parseInt(v, 10);
@@ -134,6 +172,10 @@ return baseclass.extend({
 			if (!(rr >= 100 && rr <= 3000)) { err.textContent = _('The indicator call-blink rate must be 100 to 3000 ms'); return; }
 			if (!(orate >= 200 && orate <= 10000)) { err.textContent = _('The indicator off-hook blink rate must be 200 to 10000 ms'); return; }
 
+			var rp = recPath.value.trim(), rm = parseInt(recMax.value, 10);
+			if (!/^\//.test(rp)) { err.textContent = _('The recording folder must start with a slash'); return; }
+			if (!(rm >= 1 && rm <= 4095)) { err.textContent = _('The recording budget must be 1 to 4095 MB'); return; }
+
 			ctx.api.savePhoneSettings({
 				line: { cid: cid.value, cidWhen: when(), myNumber: my, dialPauseSec: dp },
 				hookFlash: { minMs: fmin, maxMs: fmax },
@@ -144,6 +186,8 @@ return baseclass.extend({
 				indicator: { led: led.value, ringRateMs: rr, offhookRateMs: orate },
 				modem: { usbInterface: ui },
 				page: { refreshSec: parseInt(refresh.value, 10) || 1 }
+			}).then(function() {
+				return ctx.api.saveRecordingSettings({ enabled: recEnabled.get(), path: rp, maxMb: rm });
 			}).then(function() {
 				ctx.toast(_('Settings saved and applied'));
 				return load();
@@ -208,6 +252,17 @@ return baseclass.extend({
 					E('div', { 'class': 'av-inline' }, [ hotNo, hotDelay, E('span', { 'class': 'av-mut' }, 's') ])) ])
 			]),
 			E('div', { 'class': 'cbi-section' }, [
+				E('h3', _('Recording')),
+				E('div', { 'class': 'av-note' }, _('Calls are recorded onto the router\'s own storage while they happen; the recordings are listed on the Calls tab. The oldest give way when the budget is full.')),
+				u.field(_('Record calls'), _('Off by default'), E('div', { 'class': 'av-inline' }, [ recEnabled.node ])),
+				u.field(_('Recording folder'), _('Where the recordings are kept. The folder must start with a slash.'), recPath),
+				u.field(_('Storage budget'), _('The recordings may fill this many megabytes before the oldest give way (1 to 4095)'),
+					E('div', { 'class': 'av-inline' }, [ recMax, E('span', { 'class': 'av-mut' }, 'MB') ])),
+				u.field(_('Stored recordings'), _('Everything recorded so far lives in the recording folder.'),
+					E('div', { 'class': 'av-inline' }, [ recUsage,
+						u.button(_('Delete all'), 'trash', 'cbi-button-remove important', function() { recDeleteAll(); }) ]))
+			]),
+			E('div', { 'class': 'cbi-section' }, [
 				E('h3', [ _('Speed dial'),
 					E('span', { 'class': 'av-r' }, [ speedReady ? '' : tag(),
 						u.button(_('Add'), 'plus', '', function() { editors.speedDial(ctx, drawSpeed); }, speedReady ? {} : { 'disabled': true }) ]) ]),
@@ -234,11 +289,13 @@ return baseclass.extend({
 			err,
 			E('div', { 'class': 'av-acts' }, [
 				u.button(_('Save and apply'), '', 'cbi-button-save important', save),
-				u.button(_('Reset'), '', 'cbi-button-reset', load)
+				u.button(_('Reset'), '', 'cbi-button-reset', function() { load(); loadRec(); recRefreshUsage(); })
 			])
 		]);
 
 		load();
+		loadRec();
+	recRefreshUsage();
 		drawSpeed();
 		return root;
 	}

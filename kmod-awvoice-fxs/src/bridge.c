@@ -114,6 +114,17 @@ static void exchange_samples(struct awfxs *z, const struct rx_frame *in)
 		if (map->mode == AWFXS_BRIDGE_LOOP && (map->flags & AWFXS_BRIDGE_WIDEBAND))
 			paste(reply, map->modem_tx + 128, cut(in->word, map->modem_rx + 128));
 	}
+	/* the capture tap: a plain copy that must never delay or reorder the audio path; it is inert while disarmed */
+	if (z->tap.on) {
+		struct awfxs_tap_frame t;
+		bool wide = (map->flags & AWFXS_BRIDGE_WIDEBAND) != 0;
+
+		t.modem = from_modem;
+		t.line = map->mode == AWFXS_BRIDGE_CROSS ? cut(in->word, map->line_rx) : 0;
+		t.modem2 = wide ? cut(in->word, map->modem_rx + 128) : 0;
+		t.line2 = wide && map->mode == AWFXS_BRIDGE_CROSS ? cut(in->word, map->line_rx + 128) : 0;
+		tap_ring_push(&z->tap.ring, &t);
+	}
 	queue_words(z, reply, z->bridge_slots);
 	st->frames++;
 }
@@ -181,6 +192,34 @@ void awfxs_bridge_stop(struct awfxs *z)
 	kthread_stop(z->bridge_task);
 	z->bridge_task = NULL;
 	z->bridge_stats.running = 0;
+	awfxs_tap_disarm(z);
+}
+
+/* every bridge stop or restart invalidates the ring: a reader sees the generation change and arms again */
+void awfxs_tap_disarm(struct awfxs *z)
+{
+	z->tap.on = false;
+	z->tap.generation++;
+	tap_ring_reset(&z->tap.ring, z->tap.slot, AWFXS_TAP_FRAMES);
+}
+
+int awfxs_tap_set(struct awfxs *z, u32 on)
+{
+	if (on && !z->bridge_task)
+		return -ENODEV;		/* arming needs a running bridge: the tap mirrors its frames */
+	if (on)
+		tap_ring_reset(&z->tap.ring, z->tap.slot, AWFXS_TAP_FRAMES);
+	z->tap.on = on != 0;
+	return 0;
+}
+
+/* fill the kernel-side frame array for AWFXS_IOC_TAP_READ; always answers the metadata so a reader can track state */
+void awfxs_tap_fill_read(struct awfxs *z, struct awfxs_tap_read *r, struct awfxs_tap_frame *frames)
+{
+	r->got = z->tap.on ? tap_ring_pop(&z->tap.ring, frames, r->max_frames) : 0;
+	r->dropped = z->tap.ring.drops;
+	r->wideband = z->bridge_task && (z->bridge.flags & AWFXS_BRIDGE_WIDEBAND) ? 1 : 0;
+	r->generation = z->tap.generation;
 }
 
 /* how many slots the four positions need (and the second samples when wideband), and whether the PCM block is set up for them */
@@ -249,6 +288,7 @@ int awfxs_bridge_set(struct awfxs *z, const struct awfxs_bridge *b)
 	memset(&z->modem_window, 0, sizeof(z->modem_window));
 	z->bridge_stats.slots = slots;
 	z->bridge_stats.running = 1;
+	awfxs_tap_disarm(z);	/* a new bridge is a new audio layout: readers re-arm and re-check wideband */
 	z->bridge_task = kthread_run(bridge_loop, z, "awvoice-fxs-bridge");
 	if (IS_ERR(z->bridge_task)) {
 		err = PTR_ERR(z->bridge_task);

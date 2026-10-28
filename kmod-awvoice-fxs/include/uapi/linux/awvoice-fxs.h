@@ -128,4 +128,32 @@ struct awfxs_bridge_stats {
 #define AWFXS_IOC_BRIDGE	_IOW(AWFXS_IOC_MAGIC, 8, struct awfxs_bridge)
 #define AWFXS_IOC_BRIDGE_STATS	_IOR(AWFXS_IOC_MAGIC, 9, struct awfxs_bridge_stats)
 
+/*
+ * Capture tap. While armed (and a bridge is running) every bridge frame is mirrored into a ring that a reader drains
+ * with AWFXS_IOC_TAP_READ; the tap is inert while disarmed and costs the bridge thread nothing. Arming needs a
+ * running bridge. The tap disarms on every bridge stop or restart — a restart may also change the wideband layout —
+ * and bumps the generation: a reader that sees a new generation discards what it had and arms again.
+ * Each frame read back is one awfxs_tap_frame: four little-endian __u16 — modem, line, wideband second modem,
+ * wideband second line (the seconds are 0 when narrowband; line is 0 in LOOP mode).
+ */
+struct awfxs_tap_frame {
+	__u16 modem;
+	__u16 line;
+	__u16 modem2;
+	__u16 line2;
+};
+
+struct awfxs_tap_read {
+	__u64 buf;		/* in: user array of frames, four __u16 each */
+	__u32 max_frames;	/* in */
+	__u32 got;		/* out */
+	__u32 dropped;		/* out: frames dropped when the ring was full, since the arm */
+	__u32 wideband;		/* out: 1 when the armed bridge carries second samples */
+	__u32 generation;	/* out: changes on every bridge stop / restart */
+	__u32 pad;
+};
+
+#define AWFXS_IOC_TAP_SET	_IOW(AWFXS_IOC_MAGIC, 10, __u32)	/* 1 arm, 0 disarm */
+#define AWFXS_IOC_TAP_READ	_IOWR(AWFXS_IOC_MAGIC, 11, struct awfxs_tap_read)
+
 #endif /* _UAPI_LINUX_AW_FXS_H */

@@ -118,3 +118,18 @@ int dev_bridge_stats(void *ctx, void *out)
 
 	return ioctl(d->fd, AWFXS_IOC_BRIDGE_STATS, (struct awfxs_bridge_stats *)out) ? -errno : 0;
 }
+
+int dev_tap_set(struct device *d, int on)
+{
+	return ioctl(d->fd, AWFXS_IOC_TAP_SET, &on) ? -errno : 0;
+}
+
+unsigned int dev_tap_read(struct device *d, struct awfxs_tap_frame *frames, unsigned int max, struct awfxs_tap_read *meta)
+{
+	memset(meta, 0, sizeof(*meta));
+	meta->buf = (unsigned long long)(unsigned long)frames;	/* this process's own buffer: the kernel copies into it */
+	meta->max_frames = max;
+	if (ioctl(d->fd, AWFXS_IOC_TAP_READ, meta))
+		return 0;
+	return meta->got;
+}

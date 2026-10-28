@@ -17,7 +17,7 @@ CALLLOG = $(DAEMON)/calllog.c
 INDICATOR = $(DAEMON)/indicator.c
 FAKES = tests/fakes.c tests/fakes.h
 
-TESTS = build/test_hookwatch build/test_config build/test_board build/test_port build/test_daemon build/test_reply build/test_modemq build/test_numbers build/test_calllog build/test_phonebook build/test_blocking build/test_alarm build/test_forward build/test_answer build/test_indicator
+TESTS = build/test_hookwatch build/test_config build/test_board build/test_port build/test_daemon build/test_reply build/test_modemq build/test_numbers build/test_calllog build/test_phonebook build/test_blocking build/test_alarm build/test_forward build/test_answer build/test_indicator build/test_recording build/test_recorder
 
 test: core $(TESTS)
 	build/test_hookwatch && echo "hookwatch: all tests passed"
@@ -35,6 +35,8 @@ test: core $(TESTS)
 	build/test_forward
 	build/test_answer
 	build/test_indicator
+	build/test_recording
+	build/test_recorder
 
 # every core source compiles on its own, with the sanitizers (the core is also exercised through the stage tool's tests: make -C tools/slic test)
 core: $(CORE_OBJ)
@@ -85,13 +87,19 @@ build/test_blocking: tests/test_blocking.c $(CORE)/blocking.c $(CORE)/blocking.h
 build/test_phonebook: tests/test_phonebook.c $(CORE)/phonebook.c $(CORE)/phonebook.h $(CORE)/numbers.c $(CORE)/numbers.h
 	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_phonebook.c $(CORE)/phonebook.c $(CORE)/numbers.c
 
+build/test_recording: tests/test_recording.c $(DAEMON)/recording.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_recording.c
+
+build/test_recorder: tests/test_recorder.c $(DAEMON)/recorder.c $(DAEMON)/recorder.h $(DAEMON)/recording.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_recorder.c $(DAEMON)/recorder.c
+
 build/test_calllog: tests/test_calllog.c $(CALLLOG) $(DAEMON)/calllog.h $(CORE)/result.c $(CORE_HDR)
 	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_calllog.c $(CALLLOG) $(CORE)/result.c
 
 # the daemon (Linux only): libubox's event loop, libubus and libuci; no sanitizers, warnings are errors
 UAPI ?= ../kmod-awvoice-fxs/include/uapi
 STAGING ?=
-DAEMON_SRC = $(DAEMON)/main.c $(DAEMON)/hw.c $(DAEMON)/config.c $(DAEMON)/config_uci.c $(DAEMON)/api.c $(DAEMON)/reply.c $(DAEMON)/indicator.c $(CALLLOG) $(PORT) $(CORE_SRC)
+DAEMON_SRC = $(DAEMON)/main.c $(DAEMON)/hw.c $(DAEMON)/config.c $(DAEMON)/config_uci.c $(DAEMON)/api.c $(DAEMON)/reply.c $(DAEMON)/indicator.c $(CALLLOG) $(DAEMON)/recorder.c $(PORT) $(CORE_SRC)
 
 awvoice-phoned: $(DAEMON_SRC) $(CORE_HDR) $(DAEMON_HDR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Werror -ffunction-sections -fdata-sections $(INC) -I$(UAPI) \

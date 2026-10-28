@@ -19,6 +19,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <sys/file.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
@@ -42,6 +43,8 @@
 #include "indicator.h"
 #include "phone.h"
 #include "port.h"
+#include "recorder.h"
+#include "recording.h"
 #include "script.h"
 #include "slic_map.h"
 #include "stages.h"
@@ -51,6 +54,7 @@
 #define CALLS_FLASH_PATH "/etc/awvoice/calls.json"
 #define INIT_SECTION	"init_nopatch"
 #define BOARD_FILE_MAX	(64 * 1024)	/* far above a real board file; a larger file is not one */
+#define RECORD_ENTRIES_MAX	256	/* the most recordings one prune looks at */
 
 struct daemon {
 	struct aw_config cfg;
@@ -76,6 +80,12 @@ struct daemon {
 	struct indicator ind;		/* the phone LED (indicator.c): the line state, driven through /sys/class/leds */
 	unsigned int audio_call;		/* the answered call whose audio counters were noted at its start (0 = none) */
 	struct awfxs_bridge_stats audio_base;
+	struct recorder rec;		/* the answered call being recorded (awvoice.record.enabled); one at a time */
+	int rec_armed;			/* the kernel tap is armed for the open recording */
+	u32 rec_generation;		/* the tap generation the open recording follows */
+	u32 rec_call_id;		/* the recorded call's id: it names the file with the epoch */
+	int rec_rate;			/* the recording's sample rate: the call's own (8000, or 16000 on HD) */
+	char rec_name[64];		/* the recording's file name while it writes */
 	int exit_code;
 };
 
@@ -280,6 +290,60 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 		phone_status(d.phone, &st);
 		indicator_step(&d.ind, &st, now);	/* the phone LED follows the line (the patterns, indicator.c) */
 	}
+	if (d.rec.open && d.rec_armed) {
+		struct awfxs_tap_frame frames[256];
+		struct awfxs_tap_read meta;
+		uint16_t samples[1024];
+		unsigned int got, k, n, loops = 0;
+		int err = 0;
+
+		/* the bridge hands out 8000 frames a second and a tick is 5 ms: a single read of 32 frames drained
+		 * only 6400 a second, the ring filled in about five seconds and the file turned to distortion.
+		 * Drain until the ring is empty (bounded by the ring itself) before the next tick. */
+		do {
+			got = dev_tap_read(&d.dev, frames, 256, &meta);
+			if (meta.generation != d.rec_generation) {
+				/* the bridge restarted under the recording (an HD switch changes the rate with it):
+				 * the part so far is kept and a new file starts at the new rate */
+				long long saved = recorder_finish(&d.rec);
+
+				if (saved >= 0)
+					printf("the recording goes on in a new file after the rate change (%lld bytes kept)\n", saved);
+				d.rec_rate = phone_hd_active(d.phone) && d.cfg.hd ? 16000 : 8000;
+				snprintf(d.rec_name, sizeof(d.rec_name), "%lld-%u.wav", api_epoch_s(now, now), d.rec_call_id);
+				char base2[sizeof(d.rec_name)];
+
+				snprintf(base2, sizeof(base2), "%.*s", (int)strlen(d.rec_name) - 4, d.rec_name);
+				if (recorder_start(&d.rec, d.cfg.record_path, base2, (u32)d.rec_rate, 2)) {
+					dev_tap_set(&d.dev, 0);
+					d.rec_call_id = 0;
+					d.rec_name[0] = 0;	/* the log never names a file that was not written */
+					d.rec_armed = 0;
+					break;
+				}
+			}
+			if (!got)
+				break;
+			/* interleaved stereo: the far end (the modem's slot) and the handset (the line chip's slot);
+			 * wideband adds the second time sample of each, so the pair is 16 kHz like the call itself */
+			for (k = 0, n = 0; k < got; k++) {
+				samples[n++] = frames[k].modem;
+				samples[n++] = frames[k].line;
+				if (meta.wideband && d.rec_rate == 16000) {
+					samples[n++] = frames[k].modem2;
+					samples[n++] = frames[k].line2;
+				}
+			}
+			err = recorder_feed(&d.rec, samples, n);
+			if (err) {
+				dev_tap_set(&d.dev, 0);	/* the failed feed discarded its tmp: the tap goes quiet with it */
+				d.rec_call_id = 0;
+				d.rec_name[0] = 0;		/* the log never names a file that was not written */
+				d.rec_armed = 0;
+				break;
+			}
+		} while (++loops < 32);	/* 32 x 256 frames is the whole ring; more cannot arrive inside one tick */
+	}
 	api_tick(&d.api);
 	if (d.calls.ram_dirty || d.calls.flash_dirty) {
 		struct phone_status st;
@@ -338,6 +402,7 @@ static int reload(void)
 	config_load_forward(&d.forward, stdout);
 	config_load_book(&d.book, number_region_find(now.region), stdout);	/* between two steps: the core sees the new book whole */
 	d.api.at_interface = now.at_interface;
+	d.api.record_path = now.record_path;
 	phone_cfg_of(&now, &pc);
 	call_ops_of(&d);			/* caller id on or off takes hold at the next ring */
 	if (phone_set_cfg(d.phone, &pc))
@@ -424,7 +489,99 @@ static void hook_call_ended(void *ctx, const struct phone_call_record *rec)
 {
 	struct daemon *dm = ctx;
 
-	calllog_add(&dm->calls, rec, api_epoch_s(rec->start_ms, mono_ms()));
+	/* the recording belongs to this call only when it was this call's tap that armed it
+	 * (the ids are the core's own, so the match is exact) */
+	const char *rec_name = dm->rec_call_id == rec->id && dm->rec_name[0] ? dm->rec_name : NULL;
+
+	calllog_add(&dm->calls, rec, api_epoch_s(rec->start_ms, mono_ms()), rec_name);
+}
+
+/* ---- call recording (awvoice.record.*): the files' names hold an epoch and the call's id, never a number ------------- */
+
+/* when the directory is past its budget the oldest recordings go, before a new one starts (the names sort by time) */
+static void record_prune(const char *dir, unsigned int budget_mb)
+{
+	char names[256][64];
+	u32 sizes[256];
+	unsigned long long budget = (unsigned long long)budget_mb * 1024 * 1024;
+	unsigned int n = 0, k, delete;
+	struct dirent *e;
+	DIR *d = opendir(dir);
+
+	if (!d)
+		return;
+	while ((e = readdir(d)) != NULL && n < RECORD_ENTRIES_MAX) {
+		char path[AW_CONFIG_PATH_MAX + 80];
+		struct stat st;
+		size_t len = strlen(e->d_name);
+
+		if (len < 5 || strcmp(e->d_name + len - 4, ".wav") ||
+		    snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >= (int)sizeof(path) ||
+		    stat(path, &st) || !S_ISREG(st.st_mode))
+			continue;
+		memcpy(names[n], e->d_name, len + 1);
+		sizes[n] = (u32)st.st_size;
+		n++;
+	}
+	closedir(d);
+	delete = recording_prune_count(sizes, n, budget <= 0xffffffffu ? (u32)budget : 0xffffffffu);
+	for (k = 0; k < delete; k++) {
+		char path[AW_CONFIG_PATH_MAX + 80];
+
+		if (snprintf(path, sizeof(path), "%s/%s", dir, names[k]) < (int)sizeof(path))
+			(void)unlink(path);
+	}
+}
+
+/* the tap frames of one call: on answered, arm the kernel tap and open the file; on the end, close and keep it */
+static void record_call_event(struct daemon *dm, const struct phone_event *ev)
+{
+	struct awfxs_tap_frame frames[32];
+	struct awfxs_tap_read meta;
+	int err;
+
+	if (!dm->cfg.record_enabled)
+		return;
+	if (ev->call == CALL_ACTIVE && !dm->rec.open) {
+		record_prune(dm->cfg.record_path, dm->cfg.record_max_mb);
+		dm->rec_rate = phone_hd_active(dm->phone) && dm->cfg.hd ? 16000 : 8000;
+		snprintf(dm->rec_name, sizeof(dm->rec_name), "%lld-%u.wav",
+			api_epoch_s(ev->at_ms, mono_ms()), ev->call_id);
+		dm->rec_call_id = ev->call_id;
+		err = dev_tap_set(&dm->dev, 1);
+		if (!err) {
+			char base[sizeof(dm->rec_name)];
+
+			snprintf(base, sizeof(base), "%.*s", (int)strlen(dm->rec_name) - 4, dm->rec_name);
+			err = recorder_start(&dm->rec, dm->cfg.record_path, base, (u32)dm->rec_rate, 2);
+		}
+		if (err) {
+			dev_tap_set(&dm->dev, 0);
+			dm->rec_call_id = 0;
+			dm->rec_name[0] = 0;		/* the log never names a file that was not written */
+			printf("the call was not recorded: %s\n", strerror(-err));
+			return;
+		}
+		(void)dev_tap_read(&dm->dev, frames, 32, &meta);	/* the arm reset the ring: take the generation to follow */
+		dm->rec_generation = meta.generation;
+		dm->rec_armed = 1;
+		printf("the call is being recorded at %d Hz\n", dm->rec_rate);
+		return;
+	}
+	if ((ev->call == CALL_GONE || ev->call == CALL_NONE) && dm->rec.open) {
+		long long saved;
+
+		dev_tap_set(&dm->dev, 0);
+		dm->rec_armed = 0;
+		saved = recorder_finish(&dm->rec);
+		if (saved >= 0)
+			printf("the recording was saved: %lld bytes\n", saved);
+		else {
+			dm->rec_call_id = 0;
+			dm->rec_name[0] = 0;	/* the log never names a file that was not written */
+			printf("the recording failed: %s\n", strerror((int)-saved));
+		}
+	}
 }
 
 /*
@@ -448,8 +605,10 @@ static void hook_event(void *ctx, const struct phone_event *ev)
 {
 	struct daemon *dm = ctx;
 
-	if (ev->kind == PHONE_EV_CALL)
+	if (ev->kind == PHONE_EV_CALL) {
 		audio_note(dm, ev);
+		record_call_event(dm, ev);
+	}
 	api_event(&dm->api, ev);
 }
 
@@ -583,6 +742,23 @@ int main(void)
 		return 0;
 	}
 
+	/* a restart in the middle of a recording left a tmp file: it can never be finished, so it goes */
+	{
+		DIR *dir = opendir(d.cfg.record_path);
+		struct dirent *e;
+
+		while (dir && (e = readdir(dir)) != NULL) {
+			char path[AW_CONFIG_PATH_MAX + 80];
+			size_t len = strlen(e->d_name);
+
+			if (len > 4 && !strcmp(e->d_name + len - 4, ".tmp") &&
+			    snprintf(path, sizeof(path), "%s/%s", d.cfg.record_path, e->d_name) < (int)sizeof(path))
+				(void)unlink(path);
+		}
+		if (dir)
+			closedir(dir);
+	}
+
 	err = read_file(d.cfg.board, &d.board_file, &size);
 	if (!err)
 		err = board_parse(d.board_file, size, &d.board);
@@ -624,7 +800,8 @@ int main(void)
 	phone_cfg_of(&d.cfg, &pc);
 	d.hooks = (struct phone_hooks){ .ctx = &d, .bridge_start = hook_bridge, .modem_level = hook_level, .event = hook_event, .call_ended = hook_call_ended, .wall_clock = hook_wall_clock };
 	d.api = (struct api_ctx){ .my_number = d.cfg.my_number, .channel = d.cfg.channel, .at_interface = d.cfg.at_interface,
-		.port = d.ans.port, .bridge_stats = api_bridge_stats, .reload = api_reload, .ctx = &d, .hd = d.cfg.hd };
+		.port = d.ans.port, .bridge_stats = api_bridge_stats, .reload = api_reload, .ctx = &d, .hd = d.cfg.hd,
+		.record_path = d.cfg.record_path };
 	indicator_init(&d.ind);
 	indicator_apply(&d.ind, d.cfg.led, 0, 0, stdout);
 	d.api.ind = &d.ind;
@@ -659,6 +836,10 @@ int main(void)
 	uloop_done();
 
 	indicator_close(&d.ind);		/* the LED dark before the chip goes into reset */
+	if (d.rec.open)
+		recorder_abort(&d.rec);		/* the call died with the daemon: a half recording cannot be finished */
+	if (d.rec_armed)
+		dev_tap_set(&d.dev, 0);
 	err = phone_close(d.phone, d.exit_code ? -EIO : 0);
 	if (calllog_persist(&d.calls, mono_ms(), 1))
 		printf("the call log could not be saved\n");

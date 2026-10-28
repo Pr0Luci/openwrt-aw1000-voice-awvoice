@@ -221,6 +221,7 @@ void reply_calls(const struct reply_sink *o, const struct calllog *log, const st
 		o->text(o->ctx, "name", book && e->number[0] && !phonebook_name(book, e->number, name, sizeof(name)) ? name : "");
 		o->number(o->ctx, "ts", (long long)e->ts);
 		o->number(o->ctx, "durationSec", e->duration_s);
+		o->text(o->ctx, "recording", e->recording);
 		o->text(o->ctx, "result", phone_result_name(e->result));
 		o->number(o->ctx, "cause", e->cause);
 		o->close(o->ctx);
