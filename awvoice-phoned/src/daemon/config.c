@@ -7,6 +7,7 @@
 #include "hookwatch.h"
 #include "numbers.h"
 #include "phone.h"
+#include "storage.h"
 
 #define DEFAULT_BOARD		"/etc/awvoice/board.bin"
 #define DEFAULT_AT_INTERFACE	2
@@ -16,6 +17,9 @@
 #define VOLUME_MAX		255
 #define DEFAULT_HOTLINE_DELAY_S	10
 #define HOTLINE_LEN_MAX		20	/* what the dial buffer holds (DIAL_NUMBER_MAX) */
+#define DEFAULT_MACHINE_DELAY_S	10
+#define DEFAULT_RECORD_PATH	"/etc/awvoice/recordings"
+#define DEFAULT_MACHINE_PATH	"/etc/awvoice/messages"
 #define LED_NAME_MAX		63	/* a name of /sys/class/leds */
 #define RING_RATE_DEFAULT_MS	300	/* the fast blink: an incoming call */
 #define RING_RATE_MAX_MS	3000
@@ -42,7 +46,12 @@ void config_defaults(struct aw_config *c)
 	c->ring_rate_ms = RING_RATE_DEFAULT_MS;
 	c->offhook_rate_ms = OFFHOOK_RATE_DEFAULT_MS;
 	c->record_max_mb = 50;
-	snprintf(c->record_path, sizeof(c->record_path), "%s", "/etc/awvoice/recordings");
+	snprintf(c->record_path, sizeof(c->record_path), "%s", DEFAULT_RECORD_PATH);
+	c->machine_delay_s = DEFAULT_MACHINE_DELAY_S;
+	snprintf(c->machine_greeting, sizeof(c->machine_greeting), "%s", "/etc/awvoice/greeting.wav");
+	snprintf(c->machine_path, sizeof(c->machine_path), "%s", DEFAULT_MACHINE_PATH);
+	c->machine_max_mb = 50;
+	c->machine_max_s = 120;
 }
 
 /* a whole decimal number in [low, high]: no sign, no space, no trailing text */
@@ -229,9 +238,43 @@ int config_set(struct aw_config *c, const char *name, const char *value, FILE *l
 			return bad(log, name);
 		c->record_max_mb = v;
 	} else if (!strcmp(name, "record_path")) {
-		if (value[0] != '/' || strlen(value) >= sizeof(c->record_path))
+		char path[sizeof(c->record_path)];
+
+		if (value[0] != '/' || strlen(value) >= sizeof(path))
 			return bad(log, name);
-		snprintf(c->record_path, sizeof(c->record_path), "%s", value);
+		snprintf(path, sizeof(path), "%s", value);
+		if (storage_path_norm(path, sizeof(path)))
+			return bad(log, name);		/* the root, or a line break in the path */
+		snprintf(c->record_path, sizeof(c->record_path), "%s", path);
+	} else if (!strcmp(name, "machine_enabled")) {
+		if (!number_in(value, 0, 1, &v))
+			return bad(log, name);
+		c->machine_enabled = (int)v;
+	} else if (!strcmp(name, "machine_greeting")) {
+		if (value[0] != '/' || strlen(value) >= sizeof(c->machine_greeting))
+			return bad(log, name);
+		snprintf(c->machine_greeting, sizeof(c->machine_greeting), "%s", value);
+	} else if (!strcmp(name, "machine_delay")) {
+		if (!number_in(value, 0, 60, &v))
+			return bad(log, name);
+		c->machine_delay_s = v;
+	} else if (!strcmp(name, "machine_path")) {
+		char path[sizeof(c->machine_path)];
+
+		if (value[0] != '/' || strlen(value) >= sizeof(path))
+			return bad(log, name);
+		snprintf(path, sizeof(path), "%s", value);
+		if (storage_path_norm(path, sizeof(path)))
+			return bad(log, name);
+		snprintf(c->machine_path, sizeof(c->machine_path), "%s", path);
+	} else if (!strcmp(name, "machine_max_mb")) {
+		if (!number_in(value, 1, 4095, &v))
+			return bad(log, name);
+		c->machine_max_mb = v;
+	} else if (!strcmp(name, "machine_max_s")) {
+		if (!number_in(value, 10, 600, &v))
+			return bad(log, name);
+		c->machine_max_s = v;
 	} else {
 		return -ENOENT;
 	}
@@ -240,6 +283,38 @@ int config_set(struct aw_config *c, const char *name, const char *value, FILE *l
 
 void config_finish(struct aw_config *c, FILE *log)
 {
+	/* the two folders: an absolute path without its trailing slashes, never the root, and never the same folder
+	 * for both — one prune and one "Delete all" would otherwise act on the other feature's files */
+	if (storage_path_norm(c->record_path, sizeof(c->record_path))) {
+		if (log)
+			fprintf(log, "the recording folder is not a usable path: %s; the default %s is used\n",
+				c->record_path, DEFAULT_RECORD_PATH);
+		snprintf(c->record_path, sizeof(c->record_path), "%s", DEFAULT_RECORD_PATH);
+	}
+	if (storage_path_norm(c->machine_path, sizeof(c->machine_path))) {
+		if (log)
+			fprintf(log, "the message folder is not a usable path: %s; the default %s is used\n",
+				c->machine_path, DEFAULT_MACHINE_PATH);
+		snprintf(c->machine_path, sizeof(c->machine_path), "%s", DEFAULT_MACHINE_PATH);
+	}
+	if (!strcmp(c->record_path, c->machine_path)) {
+		char was[sizeof(c->machine_path)];
+
+		snprintf(was, sizeof(was), "%s", c->machine_path);
+		if (strcmp(DEFAULT_MACHINE_PATH, c->record_path))
+			snprintf(c->machine_path, sizeof(c->machine_path), "%s", DEFAULT_MACHINE_PATH);
+		else if (strlen(c->record_path) + 10 < sizeof(c->machine_path))
+			snprintf(c->machine_path, sizeof(c->machine_path), "%s/.messages", c->record_path);
+		if (!strcmp(c->record_path, c->machine_path)) {
+			/* no folder can be told apart from the recordings: the machine stays off rather than write there */
+			if (log)
+				fprintf(log, "the recordings and the messages would share a folder: the answering machine is switched off\n");
+			c->machine_enabled = 0;
+		} else if (log) {
+			fprintf(log, "the recordings and the messages were both set to %s; the messages go to %s\n",
+				was, c->machine_path);
+		}
+	}
 	if (c->flash_max_ms >= c->flash_min_ms + FLASH_GAP_MIN_MS)
 		return;
 	if (log)

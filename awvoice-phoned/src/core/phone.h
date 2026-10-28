@@ -72,6 +72,8 @@ struct phone_cfg {
 	struct phone_forward forward;	/* the network forwarding to set (forward.configured = 0: never touched) */
 	const struct alarms *alarms;	/* alarm calls (NULL = none); owned by the front end, changed only between two steps */
 	const struct blocking *block;	/* call blocking rules (NULL = none); owned by the front end, changed only between two steps */
+	int machine;			/* 1 = the answering machine may answer an offered incoming call after machine_delay_ms (the cellular leg only) */
+	unsigned int machine_delay_ms;	/* 0..60000: counted from the call's first listing; 0 answers at once */
 	int service_log;		/* 1 = the running service's log: no digit, number or name ever appears in it */
 	int level_trace;		/* 1 = log the modem's audio level every 100 ms while a call is being set up (measuring only) */
 	/* the modem's audio levels, written at every modem setup when set (the flags: 0 is a valid level) */
@@ -96,7 +98,16 @@ enum phone_result phone_result_of(enum phone_dir dir, int answered, int refused,
 /* the contract's word for a result: answered, missed, rejected, blocked, busy, no_answer, failed */
 const char *phone_result_name(enum phone_result r);
 
-enum phone_event_kind { PHONE_EV_LINE, PHONE_EV_CALL };
+/* The answering machine's relation to the current call (the status reply and the machine event). */
+enum phone_machine {
+	PHONE_MACHINE_NONE,		/* the machine is not involved */
+	PHONE_MACHINE_ANSWERING,	/* the answer went out; the modem has not listed the call active yet */
+	PHONE_MACHINE_ANSWERED,		/* the machine's call is in progress: greeting out, message being recorded */
+	PHONE_MACHINE_TAKEN,		/* the handset took the call over from the machine (an event only) */
+	PHONE_MACHINE_ENDED,		/* the machine's call is over (an event only) */
+};
+
+enum phone_event_kind { PHONE_EV_LINE, PHONE_EV_CALL, PHONE_EV_MACHINE };
 
 struct phone_event {
 	enum phone_event_kind kind;
@@ -104,6 +115,7 @@ struct phone_event {
 	unsigned int call_id;		/* 0 = no call; counts up from 1 for each call (in or out) since the start */
 	enum phone_dir dir;
 	enum call_state call;		/* the modem's view of the call (CALL_NONE when there is none) */
+	int machine;			/* enum phone_machine: NONE / ANSWERING / ANSWERED for line and call events; the reason for a machine event */
 	unsigned long long at_ms;	/* the step's clock time */
 };
 
@@ -166,6 +178,7 @@ struct phone_leg_status {
 struct phone_status {
 	enum phone_line line;
 	int off_hook;
+	int machine;				/* enum phone_machine: NONE, ANSWERING or ANSWERED (TAKEN and ENDED are events) */
 	unsigned int leg_count;			/* the voice calls the modem lists (0 when none) */
 	struct phone_leg_status legs[PHONE_LEGS_MAX];
 	unsigned int call_id;

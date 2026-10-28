@@ -19,6 +19,7 @@
 #define SNAP_WORDS_MAX		65536
 #define SNAP_TIME_MAX_US	50000
 #define TAP_READ_MAX_FRAMES	AWFXS_TAP_FRAMES	/* one read cannot need more than the ring holds */
+#define PLAY_WRITE_MAX_FRAMES	AWFXS_PLAY_FRAMES	/* one write cannot need more than the ring holds */
 
 static struct awfxs aw;
 static unsigned long opened;
@@ -32,6 +33,8 @@ union aw_arg {
 	struct awfxs_bridge bridge;
 	struct awfxs_bridge_stats bstats;
 	struct awfxs_tap_read tap_read;
+	struct awfxs_play_write play_write;
+	struct awfxs_play_status play_status;
 	u32 scalar;
 };
 
@@ -114,6 +117,37 @@ static int cmd_tap_read(struct awfxs *z, union aw_arg *a)
 	return err;
 }
 
+static int cmd_play_set(struct awfxs *z, union aw_arg *a)
+{
+	return awfxs_play_set(z, a->scalar);
+}
+
+static int cmd_play_write(struct awfxs *z, union aw_arg *a)
+{
+	struct awfxs_play_write *w = &a->play_write;
+	struct awfxs_play_frame *frames;
+	int err;
+
+	if (!w->frames || w->frames > PLAY_WRITE_MAX_FRAMES)
+		return -EINVAL;
+	frames = vmalloc(array_size(w->frames, sizeof(*frames)));
+	if (!frames)
+		return -ENOMEM;
+	if (copy_from_user(frames, u64_to_user_ptr(w->buf), array_size(w->frames, sizeof(*frames)))) {
+		vfree(frames);
+		return -EFAULT;
+	}
+	err = awfxs_play_fill_write(z, w, frames);	/* written, dropped and the generation travel back even on failure */
+	vfree(frames);
+	return err;
+}
+
+static int cmd_play_read(struct awfxs *z, union aw_arg *a)
+{
+	awfxs_play_fill_status(z, &a->play_status);
+	return 0;
+}
+
 static int cmd_snap(struct awfxs *z, union aw_arg *a)
 {
 	struct awfxs_snap *s = &a->snap;
@@ -148,6 +182,9 @@ static const struct {
 	{ AWFXS_IOC_BRIDGE_STATS, cmd_bridge_stats },
 	{ AWFXS_IOC_TAP_SET,    cmd_tap_set },
 	{ AWFXS_IOC_TAP_READ,   cmd_tap_read },
+	{ AWFXS_IOC_PLAY_SET,   cmd_play_set },
+	{ AWFXS_IOC_PLAY_WRITE, cmd_play_write },
+	{ AWFXS_IOC_PLAY_READ,  cmd_play_read },
 };
 
 static long awfxs_ioctl(struct file *file, unsigned int cmd, unsigned long user)

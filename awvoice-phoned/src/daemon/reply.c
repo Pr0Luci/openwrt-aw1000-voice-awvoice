@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 Pr0Luci
 #include <errno.h>
+#include <string.h>
 
 #include "phonebook.h"
 #include "reply.h"
@@ -69,11 +70,14 @@ void reply_status(const struct reply_sink *o, const struct phone_status *st, con
 		o->text(o->ctx, "state", "down");
 		o->text(o->ctx, "line", "down");
 		o->null(o->ctx, "hook");
+		o->null(o->ctx, "machine");
 		o->null(o->ctx, "call");
 	} else {
 		o->text(o->ctx, "state", reply_state_name(st->line));
 		o->text(o->ctx, "line", phone_line_name(st->line));
 		o->text(o->ctx, "hook", st->off_hook ? "off" : "on");
+		o->text(o->ctx, "machine", st->machine == PHONE_MACHINE_ANSWERING ? "answering"
+			: st->machine == PHONE_MACHINE_ANSWERED ? "answered" : "none");
 		if (!st->call_id) {
 			o->null(o->ctx, "call");
 		} else {
@@ -101,6 +105,24 @@ void reply_status(const struct reply_sink *o, const struct phone_status *st, con
 	o->flag(o->ctx, "running", 1);
 	o->close(o->ctx);
 	o->text(o->ctx, "myNumber", info->my_number ? info->my_number : "");
+}
+
+/* one folder of the storage block: where it is, whether it took a file at the last check, and how much room it has */
+static void storage_sink(const struct reply_sink *o, const char *name, const char *path, const struct reply_storage *s)
+{
+	o->open(o->ctx, name, 0);
+	o->text(o->ctx, "path", path ? path : "");
+	o->flag(o->ctx, "ready", s->ready);
+	if (s->ready)
+		o->number(o->ctx, "freeMb", (long long)s->free_mb);
+	else
+		o->null(o->ctx, "freeMb");
+	if (!s->ready && s->err)
+		/* the page shows the reason the folder was refused; a /mnt folder whose drive is not mounted says so */
+		o->text(o->ctx, "error", s->err == ENODEV ? "the drive is not mounted" : strerror(s->err));
+	else
+		o->null(o->ctx, "error");
+	o->close(o->ctx);
 }
 
 void reply_health(const struct reply_sink *o, const struct phone_status *st, const struct reply_info *info, unsigned long long now_ms)
@@ -187,6 +209,20 @@ void reply_health(const struct reply_sink *o, const struct phone_status *st, con
 	o->number(o->ctx, "hookGapMaxMs", st->hook_gap_max_ms);
 	o->number(o->ctx, "faults", st->faults);
 	o->close(o->ctx);
+
+	/* the answering machine: whether its greeting is loaded at all (a refused file switches the machine off) */
+	o->open(o->ctx, "machine", 0);
+	o->flag(o->ctx, "greetingLoaded", info->machine_greeting);
+	o->number(o->ctx, "greetingMs", info->machine_greeting_ms);
+	o->number(o->ctx, "delaySec", info->machine_delay_s);
+	o->close(o->ctx);
+
+	/* the two folders the files land in, as they stood at the last check (start-up, a reload, a call's start): a
+	 * folder that cannot take a file is named with its reason, so the page can warn before a call is lost */
+	o->open(o->ctx, "storage", 0);
+	storage_sink(o, "recordings", info->record_path, &info->record_store);
+	storage_sink(o, "messages", info->message_path, &info->message_store);
+	o->close(o->ctx);
 }
 
 void reply_event_line(const struct reply_sink *o, enum phone_line line)
@@ -222,6 +258,7 @@ void reply_calls(const struct reply_sink *o, const struct calllog *log, const st
 		o->number(o->ctx, "ts", (long long)e->ts);
 		o->number(o->ctx, "durationSec", e->duration_s);
 		o->text(o->ctx, "recording", e->recording);
+		o->text(o->ctx, "message", e->message);
 		o->text(o->ctx, "result", phone_result_name(e->result));
 		o->number(o->ctx, "cause", e->cause);
 		o->close(o->ctx);

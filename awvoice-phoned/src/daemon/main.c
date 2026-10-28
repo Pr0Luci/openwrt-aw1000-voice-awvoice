@@ -41,6 +41,7 @@
 #include "config.h"
 #include "hw.h"
 #include "indicator.h"
+#include "machine.h"
 #include "phone.h"
 #include "port.h"
 #include "recorder.h"
@@ -48,13 +49,13 @@
 #include "script.h"
 #include "slic_map.h"
 #include "stages.h"
+#include "storage.h"
 
 #define LOCK_PATH	"/var/run/awvoice-phoned.lock"
 #define CALLS_RAM_PATH	"/var/run/awvoice-phoned/calls.json"
 #define CALLS_FLASH_PATH "/etc/awvoice/calls.json"
 #define INIT_SECTION	"init_nopatch"
 #define BOARD_FILE_MAX	(64 * 1024)	/* far above a real board file; a larger file is not one */
-#define RECORD_ENTRIES_MAX	256	/* the most recordings one prune looks at */
 
 struct daemon {
 	struct aw_config cfg;
@@ -86,6 +87,20 @@ struct daemon {
 	u32 rec_call_id;		/* the recorded call's id: it names the file with the epoch */
 	int rec_rate;			/* the recording's sample rate: the call's own (8000, or 16000 on HD) */
 	char rec_name[64];		/* the recording's file name while it writes */
+	struct machine machine;		/* the answering machine's greeting and its one message (awvoice.machine.*) */
+	int play_armed;			/* the kernel playback ring is armed for the greeting toward the caller */
+	u32 play_generation;		/* the playback generation the greeting follows */
+	int msg_call;			/* the machine's call whose message is coming (0 = none) */
+	unsigned long long msg_at_ms;	/* the call's answer: the message file name's epoch */
+	int msg_armed;			/* the capture tap is armed for the machine's message */
+	u32 msg_generation;		/* the tap generation the message follows */
+	int msg_expected;		/* the greeting is through: the message starts (the ring's count says when) */
+	u32 msg_greeting_frames;	/* the ring frames the greeting fills */
+	u32 msg_max_frames;		/* the message's cap in mono frames (machine_max_s at the call's rate) */
+	int msg_rate;			/* the message's rate: the call's own (8000, or 16000 on HD) */
+	int greeting_stale;		/* a reload changed the greeting while a machine call was under way */
+	struct storage_state rec_store;	/* the recordings folder: made and proven at start-up, on reload, at a call */
+	struct storage_state msg_store;	/* the messages folder, the same way */
 	int exit_code;
 };
 
@@ -179,6 +194,8 @@ static void phone_cfg_of(const struct aw_config *c, struct phone_cfg *out)
 		.forward = d.forward,
 		.cid = CID_DTMF,
 		.hd = c->hd,
+		.machine = c->machine_enabled && d.machine.enabled && storage_can_write(&d.msg_store),
+		.machine_delay_ms = c->machine_delay_s * 1000u,
 		.no_cid = c->cid_kind == AW_CID_OFF,
 		.cid_prering = c->cid_prering,
 		.ringback = c->ringback,
@@ -263,6 +280,66 @@ static void modem_watch(unsigned long long now)
 	printf("the modem port was closed: looking for it again\n");
 }
 
+/* ---- the answering machine: the greeting, played toward the caller; the message, recorded from the tap ----------------- */
+
+/* the controller below runs from the step: the greeting's ring is refilled at every tick, the tap drained */
+static void machine_play_feed(struct daemon *dm);
+static void machine_tap_tick(struct daemon *dm);
+static void machine_call_start(struct daemon *dm, const struct phone_event *ev);
+static void machine_call_end(struct daemon *dm);
+static void storage_measure(struct daemon *dm);	/* both folders checked, the reply told (the storage section below) */
+
+/* the line is quiet when a file may be read: on hook, no call, no message in progress. A flash read may take a moment
+ * and the 5 ms step must not wait for it; the call log is written by the same rule. */
+static int line_quiet(struct daemon *dm)
+{
+	struct phone_status st;
+
+	if (dm->msg_call)
+		return 0;
+	phone_status(dm->phone, &st);
+	return st.line == PHONE_LINE_IDLE && !st.off_hook;
+}
+
+/* load or drop the greeting for the current settings. -EBUSY while a machine call is under way or the line is busy:
+ * the greeting is neither freed under the fill nor read while a call is up (the caller tries again when it is idle). */
+static int machine_refresh(struct daemon *dm)
+{
+	unsigned long long t0;
+	int err;
+
+	if (dm->machine.playing || dm->machine.recording)
+		return -EBUSY;		/* checked first: a switched-off machine must not free the greeting under the fill */
+	if (!dm->cfg.machine_enabled) {
+		machine_greeting_drop(&dm->machine);
+		return 0;
+	}
+	if (!line_quiet(dm))
+		return -EBUSY;
+	t0 = mono_ms();
+	err = machine_greeting_load(&dm->machine, dm->cfg.machine_greeting, stdout);
+	if (!err)
+		printf("the greeting was loaded in %llu ms\n", mono_ms() - t0);
+	return err;
+}
+
+/* the greeting a reload left for later: loaded now that the machine's call is over and the line is quiet, and the core
+ * gets the settings it was waiting for (the machine flag follows the greeting: a file that cannot be used switches the
+ * machine off) */
+static void machine_retry(struct daemon *dm)
+{
+	struct phone_cfg pc;
+
+	if (machine_refresh(dm) == -EBUSY)
+		return;			/* the greeting is still in use, or a call began in between: later */
+	dm->greeting_stale = 0;
+	phone_cfg_of(&dm->cfg, &pc);
+	if (phone_set_cfg(dm->phone, &pc))
+		printf("the new settings were refused\n");
+	else
+		printf("the deferred settings were applied\n");
+}
+
 /* ---- the step ------------------------------------------------------------------------------------------------------- */
 
 static void on_timer(struct uloop_fd *u, unsigned int events)
@@ -314,7 +391,9 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 				char base2[sizeof(d.rec_name)];
 
 				snprintf(base2, sizeof(base2), "%.*s", (int)strlen(d.rec_name) - 4, d.rec_name);
-				if (recorder_start(&d.rec, d.cfg.record_path, base2, (u32)d.rec_rate, 2)) {
+				err = recorder_start(&d.rec, d.cfg.record_path, base2, (u32)d.rec_rate, 2);
+				if (err) {
+					printf("the recording stops at the rate change: %s: %s\n", d.cfg.record_path, strerror(-err));
 					dev_tap_set(&d.dev, 0);
 					d.rec_call_id = 0;
 					d.rec_name[0] = 0;	/* the log never names a file that was not written */
@@ -336,6 +415,7 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 			}
 			err = recorder_feed(&d.rec, samples, n);
 			if (err) {
+				printf("the recording failed at %s: %s\n", d.cfg.record_path, strerror(-err));
 				dev_tap_set(&d.dev, 0);	/* the failed feed discarded its tmp: the tap goes quiet with it */
 				d.rec_call_id = 0;
 				d.rec_name[0] = 0;		/* the log never names a file that was not written */
@@ -343,6 +423,10 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 				break;
 			}
 		} while (++loops < 32);	/* 32 x 256 frames is the whole ring; more cannot arrive inside one tick */
+	}
+	if (d.msg_call) {
+		machine_play_feed(&d);		/* the greeting toward the caller, then the silence */
+		machine_tap_tick(&d);		/* the caller's side into the message, and the cap that ends the call */
 	}
 	api_tick(&d.api);
 	if (d.calls.ram_dirty || d.calls.flash_dirty) {
@@ -352,6 +436,8 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 		if (st.line == PHONE_LINE_IDLE && !st.off_hook && calllog_persist(&d.calls, now, 0))
 			printf("the call log could not be saved\n");
 	}
+	if (d.greeting_stale && !d.msg_call)
+		machine_retry(&d);
 }
 
 static int timer_start(struct uloop_fd *u)
@@ -395,6 +481,14 @@ static int reload(void)
 		d.port_next_ms = 0;
 	}
 	d.cfg = now;
+	if (machine_refresh(&d) == -EBUSY) {
+		/* the old greeting stays loaded until the machine's call is over and the line is quiet (the timer loads the
+		 * new one then) */
+		d.greeting_stale = 1;
+		printf("the line is busy or the greeting is in use: the new greeting is loaded when the line is idle\n");
+	} else {
+		d.greeting_stale = 0;
+	}
 	d.api.hd = now.hd ? (d.phone && phone_hd_active(d.phone) ? 2 : 1) : 0;
 	indicator_apply(&d.ind, now.led, 0, 0, stdout);	/* only a change acts */
 	config_load_blocking(&d.block, number_region_find(now.region), stdout);
@@ -402,7 +496,12 @@ static int reload(void)
 	config_load_forward(&d.forward, stdout);
 	config_load_book(&d.book, number_region_find(now.region), stdout);	/* between two steps: the core sees the new book whole */
 	d.api.at_interface = now.at_interface;
-	d.api.record_path = now.record_path;
+	/* d.cfg's own copies, never `now`'s: the API keeps these pointers past this return, and `now` is a stack local
+	 * (pointing at it emptied the recordings and messages lists after every reload) */
+	d.api.record_path = d.cfg.record_path;
+	d.api.message_path = d.cfg.machine_path;
+	d.api.machine_delay_s = d.cfg.machine_delay_s;
+	storage_measure(&d);		/* the folders follow the new settings, and the health reply with them */
 	phone_cfg_of(&now, &pc);
 	call_ops_of(&d);			/* caller id on or off takes hold at the next ring */
 	if (phone_set_cfg(d.phone, &pc))
@@ -492,45 +591,399 @@ static void hook_call_ended(void *ctx, const struct phone_call_record *rec)
 	/* the recording belongs to this call only when it was this call's tap that armed it
 	 * (the ids are the core's own, so the match is exact) */
 	const char *rec_name = dm->rec_call_id == rec->id && dm->rec_name[0] ? dm->rec_name : NULL;
+	const char *msg_name = NULL;
 
-	calllog_add(&dm->calls, rec, api_epoch_s(rec->start_ms, mono_ms()), rec_name);
+	/* a call list that drops the call without the gone step closes the record before the machine's ENDED event:
+	 * the message is finished here, so the entry names the file it kept */
+	if (dm->machine.recording && dm->machine.call_id == rec->id)
+		(void)machine_message_finish(&dm->machine);
+	if (dm->machine.saved && dm->machine.call_id == rec->id)
+		msg_name = dm->machine.name;
+	calllog_add(&dm->calls, rec, api_epoch_s(rec->start_ms, mono_ms()), rec_name, msg_name);
+	dm->machine.saved = 0;
+	dm->machine.name[0] = 0;
+	dm->machine.call_id = 0;
 }
 
 /* ---- call recording (awvoice.record.*): the files' names hold an epoch and the call's id, never a number ------------- */
 
-/* when the directory is past its budget the oldest recordings go, before a new one starts (the names sort by time) */
-static void record_prune(const char *dir, unsigned int budget_mb)
+/* ---- the folders the files land in (awvoice.record_path, awvoice.machine_path) --------------------------------------- */
+
+/* the folders are made and proven before they are needed: at start-up, on every reload, and again before a call
+ * starts a file, so a mount that appears (or goes) later is seen without a reload. A folder that cannot take a
+ * file is said with the consequence, never left to a silent failure at the call. */
+static struct reply_storage reply_store_of(const struct storage_state *st)
 {
-	char names[256][64];
-	u32 sizes[256];
-	unsigned long long budget = (unsigned long long)budget_mb * 1024 * 1024;
-	unsigned int n = 0, k, delete;
-	struct dirent *e;
-	DIR *d = opendir(dir);
+	return (struct reply_storage){ .ready = st->ready, .err = st->err, .free_mb = st->free_mb };
+}
 
-	if (!d)
-		return;
-	while ((e = readdir(d)) != NULL && n < RECORD_ENTRIES_MAX) {
-		char path[AW_CONFIG_PATH_MAX + 80];
-		struct stat st;
-		size_t len = strlen(e->d_name);
+/* why a folder was refused, in words for the log */
+static const char *storage_reason(const struct storage_state *st)
+{
+	return st->err == ENODEV ? "the drive is not mounted" : strerror(st->err);
+}
 
-		if (len < 5 || strcmp(e->d_name + len - 4, ".wav") ||
-		    snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >= (int)sizeof(path) ||
-		    stat(path, &st) || !S_ISREG(st.st_mode))
+static void storage_report(const char *what, const char *dir, const struct storage_state *st, const char *if_fails)
+{
+	if (st->ready && st->free_mb >= STORAGE_MIN_FREE_MB) {
+		printf("the %s folder is ready: %s (%llu MB free)\n", what, dir, st->free_mb);
+	} else if (st->ready) {
+		printf("the %s folder is nearly full: %s (%llu MB free); %s\n", what, dir, st->free_mb, if_fails);
+	} else {
+		printf("the %s folder cannot be used: %s (%s); %s\n", what, dir, storage_reason(st), if_fails);
+	}
+}
+
+#define MOUNT_MAX	32
+static char mount_paths[MOUNT_MAX][STORAGE_PATH_MAX];
+static const char *mount_list[MOUNT_MAX];
+
+/* the mount points as /proc/mounts gives them (the field after the device); anything else is skipped */
+static unsigned int mount_read(void)
+{
+	FILE *f = fopen("/proc/mounts", "r");
+	char line[STORAGE_PATH_MAX + 96];
+	unsigned int n = 0;
+
+	while (f && n < MOUNT_MAX && fgets(line, sizeof(line), f)) {
+		char *dev = strchr(line, ' '), *end = dev ? strchr(dev + 1, ' ') : NULL;
+		size_t len;
+
+		if (!dev || !end || strstr(line, "\\040"))	/* a space in the mount point: never a folder of ours */
 			continue;
-		memcpy(names[n], e->d_name, len + 1);
-		sizes[n] = (u32)st.st_size;
+		*end = 0;
+		len = strlen(dev + 1);
+		if (!len || len >= STORAGE_PATH_MAX || dev[1] != '/')
+			continue;
+		memcpy(mount_paths[n], dev + 1, len + 1);
+		mount_list[n] = mount_paths[n];
 		n++;
 	}
-	closedir(d);
-	delete = recording_prune_count(sizes, n, budget <= 0xffffffffu ? (u32)budget : 0xffffffffu);
-	for (k = 0; k < delete; k++) {
-		char path[AW_CONFIG_PATH_MAX + 80];
+	if (f)
+		fclose(f);
+	return n;
+}
 
-		if (snprintf(path, sizeof(path), "%s/%s", dir, names[k]) < (int)sizeof(path))
-			(void)unlink(path);
+/* a folder under /mnt belongs to a drive that must be mounted: without it the folder would be made on the router's
+ * own flash, so the drive list is read at every check and the folder refused until the drive is there */
+static int storage_unmounted(const char *dir)
+{
+	const char *m;
+
+	if (strncmp(dir, "/mnt", 4) || (dir[4] && dir[4] != '/'))
+		return 0;
+	m = storage_mount_of(dir, mount_list, mount_read());
+	return !m || (m[0] == '/' && !m[1]);
+}
+
+/* prepare, but never under an unmounted /mnt: nothing is created there */
+static void storage_check(const char *dir, struct storage_state *st)
+{
+	memset(st, 0, sizeof(*st));
+	if (storage_unmounted(dir))
+		st->err = ENODEV;
+	else
+		storage_prepare(dir, st);
+}
+
+/* the folders at start-up and on every reload: made, measured, and the health reply told (api.c's info_of) */
+static void storage_measure(struct daemon *dm)
+{
+	storage_check(dm->cfg.record_path, &dm->rec_store);
+	storage_check(dm->cfg.machine_path, &dm->msg_store);
+	dm->api.record_store = reply_store_of(&dm->rec_store);
+	dm->api.message_store = reply_store_of(&dm->msg_store);
+	storage_report("recordings", dm->cfg.record_path, &dm->rec_store,
+		dm->cfg.record_enabled ? "a call will not be recorded" : "recording is off, so nothing is written there yet");
+	storage_report("messages", dm->cfg.machine_path, &dm->msg_store,
+		dm->cfg.machine_enabled ? "the answering machine will not answer, and the handset rings on"
+					: "the answering machine is off, so nothing is written there yet");
+}
+
+/* a restart in the middle of a write leaves its tmp: it can never be finished, so it goes (only our own names) */
+static void storage_clean_start(const char *dir, const char *what)
+{
+	unsigned int gone = storage_tmp_clean(dir);
+
+	if (gone)
+		printf("the %s folder held %u half-written file%s from the last run: removed\n", what, gone, gone == 1 ? "" : "s");
+}
+
+/* one more check right before a file starts: 1 when it can, else one line with the reason and the consequence */
+static int storage_startable(const char *what, const char *dir, const char *if_fails, struct storage_state *st)
+{
+	storage_check(dir, st);
+	if (st->ready && st->free_mb >= STORAGE_MIN_FREE_MB)
+		return 1;
+	if (st->ready)
+		printf("the %s folder is nearly full: %s (%llu MB free); %s\n", what, dir, st->free_mb, if_fails);
+	else
+		printf("the %s folder cannot be used: %s (%s); %s\n", what, dir, storage_reason(st), if_fails);
+	return 0;
+}
+
+/* when the folder is past its budget its oldest own files go, before a new one starts (the names carry the epoch
+ * and the call id, and storage_list hands them oldest first). One prune reads the oldest STORAGE_LIST_MAX files: a
+ * folder that grew past that is pruned again at the next call. Nothing else in the folder is ever touched. */
+static void store_prune(const char *dir, unsigned int budget_mb, const char *what)
+{
+	static struct storage_entry list[STORAGE_LIST_MAX];
+	static u32 sizes[STORAGE_LIST_MAX];
+	unsigned long long budget = (unsigned long long)budget_mb * 1024 * 1024;
+	unsigned int n, k, del, gone = 0;
+	int more;
+
+	n = storage_list(dir, list, STORAGE_LIST_MAX, &more);
+	for (k = 0; k < n; k++)
+		sizes[k] = list[k].bytes;
+	del = recording_prune_count(sizes, n, budget <= 0xffffffffu ? (u32)budget : 0xffffffffu);
+	for (k = 0; k < del; k++) {
+		char path[STORAGE_PATH_MAX];
+
+		if (snprintf(path, sizeof(path), "%s/%s", dir, list[k].name) >= (int)sizeof(path))
+			continue;
+		if (unlink(path))
+			printf("an old %s could not be removed from %s: %s\n", what, dir, strerror(errno));
+		else
+			gone++;
 	}
+	if (gone)
+		printf("the %s folder was over its budget: %u of its oldest files removed%s\n", what, gone,
+			more ? " (more are there: the next call takes them)" : "");
+}
+
+/* no message can be kept on this call: the caller has heard the greeting (or their voice never reached the tap), so
+ * the line is ended rather than leaving someone talking to a machine that keeps nothing */
+static void machine_no_message(struct daemon *dm, const char *why)
+{
+	if (phone_hangup(dm->phone))
+		printf("the answering machine keeps no message this call (%s), and the call could not be ended\n", why);
+	else
+		printf("the answering machine keeps no message this call (%s): the call is ended\n", why);
+}
+
+/* start the message file: after the greeting's last frame is audible, or at once when there is no greeting */
+static void machine_message_begin(struct daemon *dm)
+{
+	char base[64];
+	int err, ok;
+
+	dm->msg_expected = 0;
+	if (!dm->msg_call)
+		return;
+	if (!dm->msg_armed) {
+		machine_no_message(dm, "the capture tap");	/* the start already said why it could not be armed */
+		return;
+	}
+	ok = storage_startable("messages", dm->cfg.machine_path, "the machine keeps no message", &dm->msg_store);
+	dm->api.message_store = reply_store_of(&dm->msg_store);
+	if (!ok) {
+		(void)dev_tap_set(&dm->dev, 0);
+		dm->msg_armed = 0;
+		machine_no_message(dm, "the message folder cannot take a file");
+		return;
+	}
+	store_prune(dm->cfg.machine_path, dm->cfg.machine_max_mb, "message");
+	snprintf(base, sizeof(base), "%lld-%u", (long long)api_epoch_s(dm->msg_at_ms, mono_ms()), (unsigned)dm->msg_call);
+	err = machine_message_open(&dm->machine, (unsigned)dm->msg_call, (u32)dm->msg_rate, dm->cfg.machine_path, base);
+	if (err) {
+		printf("the answering machine's message was not started: %s: %s\n", dm->cfg.machine_path, strerror(-err));
+		(void)dev_tap_set(&dm->dev, 0);
+		dm->msg_armed = 0;
+		machine_no_message(dm, "the message file could not be opened");
+		return;
+	}
+	printf("the answering machine is recording the message at %d Hz\n", dm->msg_rate);
+}
+
+/* keep the caller's ring about MACHINE_FILL_MS ahead of the bridge; the message starts once the greeting is through */
+static void machine_play_feed(struct daemon *dm)
+{
+	struct awfxs_play_status ps;
+	const unsigned int width = dm->msg_rate == 16000 ? 2 : 1;
+	u32 target, loops = 0;
+
+	if (!dm->play_armed) {
+		if (dm->msg_expected)
+			machine_message_begin(dm);
+		return;
+	}
+	if (dev_play_status(&dm->dev, &ps) || !ps.armed || ps.generation != dm->play_generation) {
+		/* the bridge restarted under the greeting (an HD change): the ring is gone; the message goes on alone */
+		printf("the playback ring was reset under the greeting: it stops\n");
+		(void)dev_play_set(&dm->dev, 0);
+		dm->play_armed = 0;
+		machine_stop(&dm->machine);
+		if (dm->msg_expected)
+			machine_message_begin(dm);
+		return;
+	}
+	target = MACHINE_FILL_MS * (u32)dm->msg_rate / 1000;
+	while (ps.stored < target && loops++ < 8) {
+		struct awfxs_play_frame frames[256];
+		struct awfxs_play_write w;
+		int16_t samples[512];
+		u32 want = target - ps.stored, k;
+
+		if (want > 256)
+			want = 256;		/* 512 samples: the wideband case */
+		machine_fill(&dm->machine, samples, want);
+		for (k = 0; k < want; k++) {
+			frames[k].modem = (u16)samples[k * width];
+			frames[k].modem2 = width == 2 ? (u16)samples[k * width + 1] : 0;
+			frames[k].line = frames[k].line2 = 0;	/* the handset is on hook: nothing goes to it */
+		}
+		if (dev_play_write(&dm->dev, frames, want, &w) || w.written < want) {
+			printf("the greeting could not be fed to the ring\n");
+			(void)dev_play_set(&dm->dev, 0);
+			dm->play_armed = 0;
+			machine_stop(&dm->machine);
+			return;
+		}
+		ps.stored += want;
+	}
+	/* the greeting is audible once the bridge has answered all of its frames: then the caller's words are the message */
+	if (dm->msg_expected && ps.frames >= dm->msg_greeting_frames) {
+		/* the ring's own count: a non-zero underrun count is the difference between the file and what the caller heard */
+		printf("the greeting played: %llu frames, %u underruns, %u drops\n",
+			(unsigned long long)ps.frames, ps.underruns, ps.dropped);
+		machine_message_begin(dm);
+	}
+}
+
+/* the machine has the call: the tap for the message, the ring for the greeting (both best effort: the call goes on) */
+static void machine_call_start(struct daemon *dm, const struct phone_event *ev)
+{
+	struct awfxs_tap_frame frames[32];
+	struct awfxs_tap_read meta;
+	int err;
+
+	dm->msg_call = (int)ev->call_id;
+	dm->msg_at_ms = ev->at_ms;
+	dm->msg_rate = phone_hd_active(dm->phone) && dm->cfg.hd ? 16000 : 8000;
+	dm->msg_max_frames = dm->cfg.machine_max_s * (u32)dm->msg_rate;
+	dm->msg_expected = 0;
+	dm->play_armed = 0;
+	if (!dm->cfg.machine_enabled || !dm->machine.enabled) {
+		/* should not happen: the core's machine flag follows the loaded greeting and the folder's state. If a settings
+		 * change raced the answer, say so and end the call: no greeting is played and no message kept */
+		dm->msg_call = 0;
+		printf("the answering machine answered without a greeting: the call is not recorded and the caller hears the line (check awvoice.main.machine_greeting)\n");
+		machine_no_message(dm, "the greeting is not loaded");
+		return;
+	}
+	err = dev_tap_set(&dm->dev, 1);
+	if (!err) {
+		(void)dev_tap_read(&dm->dev, frames, 32, &meta);	/* the arm reset the ring: take the generation to follow */
+		dm->msg_generation = meta.generation;
+		dm->msg_armed = 1;
+	} else {
+		printf("the message cannot be recorded (the capture tap: %s)\n", strerror(-err));
+		dm->msg_armed = 0;
+	}
+	if (machine_start(&dm->machine, (u32)dm->msg_rate)) {
+		machine_message_begin(dm);	/* no greeting (a settings change raced the call): the message alone */
+		return;
+	}
+	err = dev_play_set(&dm->dev, 1);
+	if (!err) {
+		struct awfxs_play_status ps;
+
+		dm->play_armed = 1;
+		dm->msg_expected = 1;
+		dm->msg_greeting_frames = dm->machine.ring_frames;
+		if (!dev_play_status(&dm->dev, &ps))
+			dm->play_generation = ps.generation;
+		printf("the answering machine's greeting is playing\n");
+		machine_play_feed(dm);		/* primed now, not a tick later */
+		return;
+	}
+	printf("the greeting cannot be played: %s\n", strerror(-err));
+	machine_stop(&dm->machine);
+	machine_message_begin(dm);
+}
+
+/* the machine's call is over (the handset took it, or the remote ended it): the message is finished and kept. The call
+ * recording does not start at a takeover: the message is this call's record, and it holds the caller up to the lift —
+ * the classic answering-machine behaviour. */
+static void machine_call_end(struct daemon *dm)
+{
+	long long bytes;
+
+	if (dm->play_armed) {
+		(void)dev_play_set(&dm->dev, 0);
+		dm->play_armed = 0;
+	}
+	machine_stop(&dm->machine);
+	if (dm->msg_armed) {
+		(void)dev_tap_set(&dm->dev, 0);
+		dm->msg_armed = 0;
+	}
+	dm->msg_expected = 0;
+	dm->msg_call = 0;
+	if (!dm->machine.recording)
+		return;
+	bytes = machine_message_finish(&dm->machine);
+	if (bytes > 0)
+		printf("the answering machine's message was saved: %lld bytes\n", bytes);
+	else if (bytes < 0)
+		printf("the answering machine's message failed: %s\n", strerror((int)-bytes));
+}
+
+/* the tap frames of the machine's call: discarded while the greeting plays, then the caller's side is the message */
+static void machine_tap_tick(struct daemon *dm)
+{
+	struct awfxs_tap_frame frames[256];
+	struct awfxs_tap_read meta;
+	int16_t samples[512];
+	unsigned int got, k, n, loops = 0;
+	int err;
+
+	if (!dm->msg_armed)
+		return;			/* the tap is not on the caller (never armed, or its message is already closed) */
+	do {
+		got = dev_tap_read(&dm->dev, frames, 256, &meta);
+		if (meta.generation != dm->msg_generation) {
+			printf("the capture tap was reset under the message: it is kept and the recording stops\n");
+			(void)dev_tap_set(&dm->dev, 0);
+			dm->msg_armed = 0;
+			if (dm->machine.recording && machine_message_finish(&dm->machine) > 0)
+				printf("the answering machine's message was saved\n");
+			machine_no_message(dm, "the capture tap was reset");
+			return;
+		}
+		if (!got)
+			break;
+		if (!dm->machine.recording)
+			continue;		/* the greeting is still going: the caller's words now are its echo */
+		for (k = 0, n = 0; k < got; k++) {
+			samples[n++] = (int16_t)frames[k].modem;
+			if (meta.wideband && dm->msg_rate == 16000)
+				samples[n++] = (int16_t)frames[k].modem2;
+		}
+		err = machine_message_feed(&dm->machine, samples, n);
+		if (err) {
+			printf("the answering machine's message failed: %s\n", strerror(-err));
+			(void)dev_tap_set(&dm->dev, 0);
+			dm->msg_armed = 0;
+			machine_no_message(dm, "the message could not be written");
+			return;
+		}
+		if (dm->machine.rec_frames >= dm->msg_max_frames) {
+			/* the caller had the time the setting allows: the message is closed and the call ends here */
+			long long bytes = machine_message_finish(&dm->machine);
+
+			if (bytes > 0)
+				printf("the answering machine's message was saved: %lld bytes\n", bytes);
+			(void)dev_tap_set(&dm->dev, 0);
+			dm->msg_armed = 0;
+			if (phone_hangup(dm->phone))
+				printf("the call could not be ended at the message's limit\n");
+			else
+				printf("the answering machine's message reached its limit (%u s): the call is ended\n", dm->cfg.machine_max_s);
+			return;
+		}
+	} while (++loops < 32);
 }
 
 /* the tap frames of one call: on answered, arm the kernel tap and open the file; on the end, close and keep it */
@@ -542,24 +995,36 @@ static void record_call_event(struct daemon *dm, const struct phone_event *ev)
 
 	if (!dm->cfg.record_enabled)
 		return;
+	if (ev->call == CALL_ACTIVE && ev->machine != PHONE_MACHINE_NONE)
+		return;			/* the machine's call: its message is this call's recording and the handset hears nothing.
+					 * A lift later (PHONE_MACHINE_TAKEN) does not re-arm this recorder: the message is the call's
+					 * record up to the lift, and one call keeps one record. The policy is deliberate for F2. */
 	if (ev->call == CALL_ACTIVE && !dm->rec.open) {
-		record_prune(dm->cfg.record_path, dm->cfg.record_max_mb);
+		int ok = storage_startable("recordings", dm->cfg.record_path, "the call is not recorded", &dm->rec_store);
+
+		dm->api.record_store = reply_store_of(&dm->rec_store);
+		if (!ok)
+			return;
+		store_prune(dm->cfg.record_path, dm->cfg.record_max_mb, "recording");
 		dm->rec_rate = phone_hd_active(dm->phone) && dm->cfg.hd ? 16000 : 8000;
 		snprintf(dm->rec_name, sizeof(dm->rec_name), "%lld-%u.wav",
 			api_epoch_s(ev->at_ms, mono_ms()), ev->call_id);
 		dm->rec_call_id = ev->call_id;
 		err = dev_tap_set(&dm->dev, 1);
-		if (!err) {
+		if (err) {
+			printf("the call was not recorded: the capture tap could not be armed (%s)\n", strerror(-err));
+		} else {
 			char base[sizeof(dm->rec_name)];
 
 			snprintf(base, sizeof(base), "%.*s", (int)strlen(dm->rec_name) - 4, dm->rec_name);
 			err = recorder_start(&dm->rec, dm->cfg.record_path, base, (u32)dm->rec_rate, 2);
+			if (err)
+				printf("the call was not recorded: %s: %s\n", dm->cfg.record_path, strerror(-err));
 		}
 		if (err) {
 			dev_tap_set(&dm->dev, 0);
 			dm->rec_call_id = 0;
 			dm->rec_name[0] = 0;		/* the log never names a file that was not written */
-			printf("the call was not recorded: %s\n", strerror(-err));
 			return;
 		}
 		(void)dev_tap_read(&dm->dev, frames, 32, &meta);	/* the arm reset the ring: take the generation to follow */
@@ -608,6 +1073,11 @@ static void hook_event(void *ctx, const struct phone_event *ev)
 	if (ev->kind == PHONE_EV_CALL) {
 		audio_note(dm, ev);
 		record_call_event(dm, ev);
+	} else if (ev->kind == PHONE_EV_MACHINE) {
+		if (ev->machine == PHONE_MACHINE_ANSWERED)
+			machine_call_start(dm, ev);	/* the modem put the answer through: the greeting and the message start */
+		else if (ev->machine == PHONE_MACHINE_TAKEN || ev->machine == PHONE_MACHINE_ENDED)
+			machine_call_end(dm);		/* the handset took the call, or it is over: the message is closed */
 	}
 	api_event(&dm->api, ev);
 }
@@ -742,21 +1212,15 @@ int main(void)
 		return 0;
 	}
 
-	/* a restart in the middle of a recording left a tmp file: it can never be finished, so it goes */
-	{
-		DIR *dir = opendir(d.cfg.record_path);
-		struct dirent *e;
+	machine_init(&d.machine);
+	storage_clean_start(d.cfg.record_path, "recordings");
+	storage_clean_start(d.cfg.machine_path, "messages");
+	if (d.cfg.machine_enabled) {
+		unsigned long long t0 = mono_ms();
 
-		while (dir && (e = readdir(dir)) != NULL) {
-			char path[AW_CONFIG_PATH_MAX + 80];
-			size_t len = strlen(e->d_name);
-
-			if (len > 4 && !strcmp(e->d_name + len - 4, ".tmp") &&
-			    snprintf(path, sizeof(path), "%s/%s", d.cfg.record_path, e->d_name) < (int)sizeof(path))
-				(void)unlink(path);
-		}
-		if (dir)
-			closedir(dir);
+		if (!machine_greeting_load(&d.machine, d.cfg.machine_greeting, stdout))
+			printf("the answering machine is on (the greeting: %u frames at 8000 Hz, %u at 16000; loaded in %llu ms)\n",
+				d.machine.frames[0], d.machine.frames[1], mono_ms() - t0);
 	}
 
 	err = read_file(d.cfg.board, &d.board_file, &size);
@@ -797,11 +1261,13 @@ int main(void)
 	calllog_init(&d.calls, CALLS_RAM_PATH, CALLS_FLASH_PATH, mono_ms());
 	if (!calllog_load(&d.calls, stdout))
 		printf("the call log was loaded\n");
-	phone_cfg_of(&d.cfg, &pc);
 	d.hooks = (struct phone_hooks){ .ctx = &d, .bridge_start = hook_bridge, .modem_level = hook_level, .event = hook_event, .call_ended = hook_call_ended, .wall_clock = hook_wall_clock };
 	d.api = (struct api_ctx){ .my_number = d.cfg.my_number, .channel = d.cfg.channel, .at_interface = d.cfg.at_interface,
 		.port = d.ans.port, .bridge_stats = api_bridge_stats, .reload = api_reload, .ctx = &d, .hd = d.cfg.hd,
-		.record_path = d.cfg.record_path };
+		.record_path = d.cfg.record_path, .message_path = d.cfg.machine_path,
+		.machine = &d.machine, .machine_delay_s = d.cfg.machine_delay_s };
+	storage_measure(&d);		/* both folders made and proven before the first call, and the health reply told */
+	phone_cfg_of(&d.cfg, &pc);	/* after the folders: the machine answers only when a message could be kept */
 	indicator_init(&d.ind);
 	indicator_apply(&d.ind, d.cfg.led, 0, 0, stdout);
 	d.api.ind = &d.ind;
@@ -840,6 +1306,11 @@ int main(void)
 		recorder_abort(&d.rec);		/* the call died with the daemon: a half recording cannot be finished */
 	if (d.rec_armed)
 		dev_tap_set(&d.dev, 0);
+	if (d.play_armed)
+		dev_play_set(&d.dev, 0);	/* the greeting stops before the chip goes into reset */
+	if (d.msg_armed)
+		dev_tap_set(&d.dev, 0);
+	machine_free(&d.machine);		/* a half-written message cannot be finished: its tmp goes */
 	err = phone_close(d.phone, d.exit_code ? -EIO : 0);
 	if (calllog_persist(&d.calls, mono_ms(), 1))
 		printf("the call log could not be saved\n");

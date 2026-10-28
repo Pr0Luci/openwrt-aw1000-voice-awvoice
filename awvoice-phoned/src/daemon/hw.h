@@ -31,4 +31,11 @@ int dev_bridge_start(void *ctx, unsigned int modem_rx, unsigned int modem_tx, un
 int dev_tap_set(struct device *d, int on);	/* 0 or -errno; arming needs a running bridge */
 unsigned int dev_tap_read(struct device *d, struct awfxs_tap_frame *frames, unsigned int max, struct awfxs_tap_read *meta);
 
+/* the kernel bridge's playback ring (uapi AWFXS_IOC_PLAY_*): while armed the caller's side hears the frames written
+ * here instead of the bridge's own; an empty ring is silence. dev_play_write fills `meta` (written, dropped,
+ * generation) whether the write succeeded or not. */
+int dev_play_set(struct device *d, int on);	/* 0 or -errno; arming needs a running bridge */
+int dev_play_write(struct device *d, const struct awfxs_play_frame *frames, unsigned int count, struct awfxs_play_write *meta);
+int dev_play_status(struct device *d, struct awfxs_play_status *out);	/* 0 or -errno; fills `out` always */
+
 #endif /* AW_PHONED_HW_H */

@@ -19,6 +19,18 @@ function count(v) {
 	return v == null ? '—' : String(v);
 }
 
+/* a folder the daemon checked: ready with its free space, refused with the reason, or not checked by an older daemon */
+function folder(s) {
+	if (s && s.ready === true) {
+		if (s.freeMb != null && s.freeMb < 1)
+			return [ _('Nearly full: %s MB free').format(s.freeMb), 'av-warn' ];	/* the daemon starts no file under 1 MB */
+		return [ s.freeMb == null ? _('Ready') : _('Ready, %s MB free').format(s.freeMb), 'av-ok' ];
+	}
+	if (s && s.ready === false)
+		return [ s.error ? _('Cannot be used: %s').format(s.error) : _('Cannot be used'), 'av-err' ];
+	return [ _('Not checked yet'), 'av-mut' ];
+}
+
 return baseclass.extend({
 	render: function(ctx) {
 		var u = ctx.ui, busyCall = false, down = false;
@@ -26,7 +38,7 @@ return baseclass.extend({
 		var banIcon = u.icon('radio'), banTitle = E('b', _('Modem AT port')), banSub = E('div', { 'class': 'av-sub' });
 		var ban = E('div', { 'class': 'av-ban', 'role': 'status' }, [ banIcon, E('div', [ banTitle, banSub ]) ]);
 
-		var at = E('div'), line = E('div'), modem = E('div'), sys = E('div');
+		var at = E('div'), line = E('div'), modem = E('div'), sys = E('div'), store = E('div');
 		var counters = E('div', { 'class': 'av-tiles' }), logTail = E('div', { 'class': 'av-log av-mono' });
 		var gone = E('div', { 'class': 'av-ban e', 'role': 'status' }, [ u.icon('alert'), E('div', _('The phone service does not answer, so there is no health data. Start it below.')) ]);
 		gone.hidden = true;
@@ -35,6 +47,7 @@ return baseclass.extend({
 		var bStop = u.button(_('Stop'), 'stop', '', function() { confirmAct('stop', _('Stop the phone service? Calls cannot be made or received until it is started again.')); });
 		var bRestart = u.button(_('Restart'), 'refresh', '', function() { confirmAct('restart', _('Restart the phone service? This takes a few seconds.')); });
 		var svcNote = E('div', { 'class': 'av-note' }, _('Stop and restart are refused while a call is active.'));
+		var storeNote = E('div', { 'class': 'av-note' });
 
 		function fill(node, rows) {
 			node.textContent = '';
@@ -75,7 +88,8 @@ return baseclass.extend({
 			if (!h) {
 				ban.className = 'av-ban e';
 				banSub.textContent = _('No answer from the phone service.');
-				[ at, line, modem, sys, counters ].forEach(function(n) { n.textContent = ''; });
+				[ at, line, modem, sys, store, counters ].forEach(function(n) { n.textContent = ''; });
+				storeNote.textContent = '';
 				logTail.textContent = '';
 				return;
 			}
@@ -128,6 +142,16 @@ return baseclass.extend({
 				[ _('Longest gap'), br.maxGapUs == null ? '—' : br.maxGapUs + ' µs', 'av-mono' ]
 			]);
 
+			var st = h.storage || {}, rec = st.recordings, msg = st.messages;
+			var recOk = folder(rec), msgOk = folder(msg);
+			fill(store, [
+				[ _('Recordings folder'), rec && rec.path ? rec.path : '—', 'av-mono' ],
+				[ _('Recordings'), recOk[0], recOk[1] ],
+				[ _('Messages folder'), msg && msg.path ? msg.path : '—', 'av-mono' ],
+				[ _('Messages'), msgOk[0], msgOk[1] ]
+			]);
+			storeNote.textContent = _('Each folder is made and checked when the service starts or reloads, and again before a call writes a file.');
+
 			counters.textContent = '';
 			[ [ _('Modem timeouts'), h.counters.modemTimeouts ], [ _('Hook gaps over 20 ms'), h.counters.hookGapsOver20ms ],
 				[ _('Longest hook gap (ms)'), h.counters.hookGapMaxMs ], [ _('Faults'), h.counters.faults ] ]
@@ -147,6 +171,7 @@ return baseclass.extend({
 				card(_('Line'), line),
 				card(_('Modem, SIM and VoLTE'), modem),
 				card(_('System'), sys),
+				card(_('Storage'), E('div', [ store, storeNote ])),
 				card(_('Service'), E('div', [ E('div', { 'class': 'av-acts' }, [ bStart, bStop, bRestart ]), svcNote ]))
 			]),
 			E('div', { 'class': 'cbi-section' }, [

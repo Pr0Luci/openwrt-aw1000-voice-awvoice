@@ -13,8 +13,10 @@
 
 #include "window.h"
 #include "tap_ring.h"
+#include "play_ring.h"
 
 #define AWFXS_TAP_FRAMES	8192	/* capture ring capacity in frames, power of two: about one second of narrowband audio */
+#define AWFXS_PLAY_FRAMES	4096	/* playback ring capacity in frames, power of two: 512 ms at 8 kHz, 256 ms at 16 kHz */
 
 /*
  * Register blocks are described as overlay structures; a pointer to the first byte of the block is cast
@@ -173,6 +175,15 @@ struct awfxs {
 		struct awfxs_tap_frame slot[AWFXS_TAP_FRAMES];
 	} tap;
 
+	struct awfxs_play {
+		bool on;		/* armed by AWFXS_IOC_PLAY_SET; disarms on every bridge stop / restart */
+		u32 generation;		/* bumped on every bridge stop / restart; the writer re-arms on a change */
+		struct awfxs_play_ring ring;
+		struct awfxs_play_frame slot[AWFXS_PLAY_FRAMES];
+		u64 frames;		/* frames the bridge took from here since the arm, silent ones included */
+		u32 underruns;		/* frames sent as silence because the ring was empty, since the arm */
+	} play;
+
 	struct timer_list wd_timer;
 	unsigned long wd_flags;		/* AW_WD_* bits, touched from the timer too */
 	atomic_t wd_trips;
@@ -203,6 +214,12 @@ void awfxs_bridge_stats(struct awfxs *z, struct awfxs_bridge_stats *s);
 void awfxs_tap_disarm(struct awfxs *z);
 int awfxs_tap_set(struct awfxs *z, u32 on);
 void awfxs_tap_fill_read(struct awfxs *z, struct awfxs_tap_read *r, struct awfxs_tap_frame *frames);
+
+/* bridge.c: the playback ring (armed writes replace what the bridge sends; an empty ring sends silence) */
+void awfxs_play_disarm(struct awfxs *z);
+int awfxs_play_set(struct awfxs *z, u32 on);
+int awfxs_play_fill_write(struct awfxs *z, struct awfxs_play_write *w, const struct awfxs_play_frame *frames);
+void awfxs_play_fill_status(struct awfxs *z, struct awfxs_play_status *s);
 
 /* watchdog.c: keeps the chip in a safe state when nobody is looking after the line */
 void awfxs_wd_init(struct awfxs *z);

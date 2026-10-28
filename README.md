@@ -6,7 +6,8 @@ No SIP, no Asterisk, no second number — the cellular network is the exchange a
 
 ## What's new
 
-- Call recordings: answered calls land on the router as WAV files and the call log links each call to its own recording — play, save or delete it from the call's card on the Calls tab. Stereo (the caller and the handset on separate channels), 16 kHz with HD voice, opt-in from the Settings tab with a size budget for the storage. The files never carry a phone number.
+- Answering machine: after a delay you choose, an unanswered call on the SIM's line hears your greeting and leaves a message on the router. The call log links each call to its own message — play, save or delete it from the call's card on the Calls tab — and the Settings tab shows how much the messages take and deletes them all. Off by default; the greeting is your own WAV file.
+- Call recordings: calls you answer land on the router as WAV files and the call log links each call to its own recording — play, save or delete it from the call's card on the Calls tab. Stereo (the caller and the handset on separate channels), 16 kHz with HD voice, opt-in from the Settings tab with a size budget for the storage. The files never carry a phone number. A call the answering machine answered is kept as its message instead.
 
 ## What it does
 
@@ -17,8 +18,10 @@ No SIP, no Asterisk, no second number — the cellular network is the exchange a
 - Caller id on the handset's display: FSK (Bellcore or ETSI) or the DTMF variant, sent before or after the first ring.
 - Calling-line restriction, network service codes, a hotline number.
 - Call log with search, filters and CSV export, phonebook with speed dial, alarm (wake-up) calls, a line test.
-- Call recording (off by default — a recording may need an announcement where you live; turn it on in Settings): answered calls land on the router as WAV files, stereo — the caller and the handset on separate channels — at 16 kHz when HD voice is on. The call's own card in the log plays, saves or deletes its recording.
+- Call recording (off by default — a recording may need an announcement where you live; turn it on in Settings): calls you answer land on the router as WAV files, stereo — the caller and the handset on separate channels — at 16 kHz when HD voice is on. The call's own card in the log plays, saves or deletes its recording. A call the answering machine answered is kept as its message instead: when you pick the handset up, the message ends at the lift and the rest of the conversation is not recorded.
 - The recordings never carry a phone number — a file's name is the call's time and id — and a size budget (50 MB by default) removes the oldest when the storage passes it.
+- Both storage folders (the recordings and the messages) are made and checked when the service starts or reloads, and again before a call writes its first file: a missing folder on a mounted drive is created, and a folder that cannot be written — or a drive with almost no space — is reported on the Health tab instead of failing silently. The answering machine does not answer a call it could not keep a message from, so the handset still rings. A folder under `/mnt` is only used once its drive is mounted — never created on the router's own flash under an unmounted mount point — and the two folders are always kept apart.
+- Answering machine (off by default; only calls on the cellular line are answered): after a settable delay — zero answers at once — the greeting you put on the router is played to the caller and what they say is kept as a message. The call log links each call to its message, played, saved or deleted in that call's card; the Settings tab shows the storage the messages take and deletes the whole folder. The greeting must be a 16-bit PCM WAV at 8 or 16 kHz; a file the machine cannot read switches it off rather than answer with noise. Messages get their own size budget and a longest-message limit, and their names carry no phone number. Picking up the handset during the machine's call hands the call over; the part of the message already recorded is kept — the classic answering-machine (TAD) behaviour, the same in standard voicemail systems.
 - Emergency numbers always ring through: nothing on the router blocks or drops them.
 
 **A note on safety and emergencies:** the RJ11 contacts sit at about 46 V, and higher while the phone rings. This is not certified telephone equipment — do not rely on it for emergency calls, and check the rules that apply to you before connecting anything to the telephone network.
@@ -29,8 +32,8 @@ No SIP, no Asterisk, no second number — the cellular network is the exchange a
 
 | package | it is |
 | --- | --- |
-| `kmod-awvoice-fxs` | the kernel module: the line chip's register bus, the PCM block, the audio bridge between the modem and the line chip, the capture tap for the call recordings, and the ring watchdog |
-| `awvoice-phoned` | the phone daemon: the hook, the tones, dialling, ringing, caller id, the call log, the call recordings and the `ubus` service `awvoice` |
+| `kmod-awvoice-fxs` | the kernel module: the line chip's register bus, the PCM block, the audio bridge between the modem and the line chip, the capture tap for the recordings and messages, the playback ring that carries a greeting to the caller, and the ring watchdog |
+| `awvoice-phoned` | the phone daemon: the hook, the tones, dialling, ringing, caller id, the call log, the call recordings, the answering machine (its greeting and messages) and the `ubus` service `awvoice` |
 | `luci-app-awvoice` | the LuCI page, **Services → AWvoice(RJ11)** |
 
 ## Hardware
@@ -88,6 +91,8 @@ cd packages/awvoice-phoned && make -f Makefile.host test
 ## Under the hood
 
 A thin kernel module owns the line chip's register bus, the PCM block and a hardware ring watchdog: if the phone service ever stops, the chip is back in reset within milliseconds — the phone never rings forever and the line never stays live. All the line logic sits in one daemon on a single 5 millisecond clock, and the whole core builds and runs on an ordinary computer without the hardware (`make -f Makefile.host test` in each package).
+
+The caller's voice reaches the daemon through a lock-free capture ring, and an answering-machine greeting goes back through a matching playback ring — the first locally generated voice this port sends toward the caller. An empty ring is silence with a counted underrun, never a stale frame from an earlier call; the bridges' stop and start reset both rings.
 
 ## Licence
 

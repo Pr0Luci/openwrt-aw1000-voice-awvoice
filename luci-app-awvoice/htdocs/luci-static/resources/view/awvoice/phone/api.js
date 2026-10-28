@@ -15,10 +15,10 @@
  * whose backend is not built yet rejects with "Not available yet", and api.available[name] is false so that the page
  * can show its controls disabled instead of calling it.
  *
- * The recording calls (list, read chunk, delete and their settings) are served from this file directly: the daemon
- * side is one self-contained ubus object plus three options of the awvoice package's main section, so they get a
- * small extra door here instead of growing the provider. The shapes are the recording contract: 16-bit mono PCM in
- * canonical 44-byte WAV files.
+ * The recording and message calls (list, read chunk, delete) are served from this file directly: the daemon side is
+ * one self-contained ubus object plus the options of the awvoice package's main section, so they get a small extra
+ * door here instead of growing the provider. The shapes are the recording contract: 16-bit PCM in canonical 44-byte
+ * WAV files; a message is the answering machine's recording of a caller, in the same canonical shape.
  */
 
 var METHODS = [
@@ -32,7 +32,7 @@ var METHODS = [
 	'listAlarms', 'saveAlarm', 'removeAlarm'
 ];
 
-/* ---- recordings ---- */
+/* ---- recordings and the answering machine's messages ---- */
 
 function remote(object, method, params) {
 	return rpc.declare({ object: object, method: method, params: params || [] });
@@ -48,6 +48,12 @@ var recBus = {
 	del: remote('awvoice', 'recording_delete', [ 'name' ]),
 	commit: remote('uci', 'commit', [ 'config' ]),
 	reload: remote('awvoice', 'reload')
+};
+
+var msgBus = {
+	list: remote('awvoice', 'messages'),
+	get: remote('awvoice', 'message_get', [ 'name', 'offset' ]),
+	del: remote('awvoice', 'message_delete', [ 'name' ])
 };
 
 /* the same words the provider puts on a ubus failure, so both doors fail alike */
@@ -73,8 +79,8 @@ function recOpt(name, def) {
 	return v == null ? def : String(v);
 }
 
-/* write what is staged in uci, commit it and tell the daemon: the provider's own save path, for the recording options */
-function recStore() {
+/* write what is staged in uci, commit it and tell the daemon: the provider's own save path, for the daemon-only options */
+function storeUci() {
 	return uci.save().then(function() {
 		return recBus.commit(CONF);
 	}).then(function() {
@@ -85,9 +91,19 @@ function recStore() {
 	});
 }
 
+/* a File of the daemon's reply: the page's shape, whatever the daemon left out */
+function entry(x) {
+	return {
+		name: str(x.name), bytes: Math.max(0, num(x.bytes) || 0),
+		rate: Math.max(0, num(x.rate) || 0), seconds: Math.max(0, num(x.seconds) || 0),
+		channels: Math.max(1, num(x.channels) || 1)
+	};
+}
+
 var api = {
 	available: Object.assign({ listRecordings: true, getRecording: true, deleteRecording: true,
-		getRecordingSettings: true, saveRecordingSettings: true }, provider.available || {}),
+		getRecordingSettings: true, saveRecordingSettings: true,
+		listMessages: true, getMessage: true, deleteMessage: true }, provider.available || {}),
 	settingsLive: provider.settingsLive || {},
 	downStatus: function() { return provider.downStatus(); },
 
@@ -95,13 +111,7 @@ var api = {
 	listRecordings: function() {
 		return recBus.list().then(function(r) {
 			var list = r && Array.isArray(r.recordings) ? r.recordings : [];
-			return list.map(function(x) {
-				return {
-					name: str(x.name), bytes: Math.max(0, num(x.bytes) || 0),
-					rate: Math.max(0, num(x.rate) || 0), seconds: Math.max(0, num(x.seconds) || 0),
-					channels: Math.max(1, num(x.channels) || 1)
-				};
-			});
+			return list.map(entry);
 		}, function(e) { throw fail(e); });
 	},
 
@@ -130,6 +140,47 @@ var api = {
 		}, function(e) { throw fail(e); });
 	},
 
+	/* the answering machine's messages, newest first: a message's name leads with the epoch its call was answered */
+	listMessages: function() {
+		return msgBus.list().then(function(r) {
+			var list = r && Array.isArray(r.messages) ? r.messages : [];
+			return list.map(function(x) {
+				var m = entry(x);
+
+				m.ts = Math.max(0, num(x.ts) || 0);
+				return m;
+			}).sort(function(a, b) {
+				if (a.ts !== b.ts)
+					return b.ts - a.ts;
+				return a.name < b.name ? 1 : a.name > b.name ? -1 : 0;
+			});
+		}, function(e) { throw fail(e); });
+	},
+
+	/* one chunk of a message, as getRecording; the name is the only handle and the daemon refuses any other */
+	getMessage: function(name, offset) {
+		name = recName(name);
+		if (!name || !(offset >= 0))
+			return Promise.reject(new Error(_('Not a message name')));
+		return msgBus.get(name, Math.floor(offset)).then(function(r) {
+			r = r || {};
+			return {
+				name: str(r.name), rate: Math.max(0, num(r.rate) || 0), total: Math.max(0, num(r.total) || 0),
+				offset: Math.max(0, num(r.offset) || 0), b64: str(r.b64), more: r.more === 1 || r.more === true
+			};
+		}, function(e) { throw fail(e); });
+	},
+
+	deleteMessage: function(name) {
+		name = recName(name);
+		if (!name)
+			return Promise.reject(new Error(_('Not a message name')));
+		return msgBus.del(name).then(function(r) {
+			r = r || {};
+			return { ok: r.ok === 1 || r.ok === true, removed: r.removed === 1 || r.removed === true };
+		}, function(e) { throw fail(e); });
+	},
+
 	getRecordingSettings: function() {
 		uci.unload(CONF);
 		return uci.load(CONF).then(function() {
@@ -142,13 +193,16 @@ var api = {
 		}, function(e) { throw fail(e); });
 	},
 
-	/* returns the saved settings; the daemon applies them through its own reload */
+	/* returns the saved settings; the daemon applies them through its own reload. The folder is written as the
+	 * daemon reads it: no trailing slashes, and the root is refused (the daemon would fall back to its default) */
 	saveRecordingSettings: function(s) {
 		var max = s && s.maxMb;
+		var path = s && typeof s.path === 'string' ? s.path.trim().replace(/\/+$/, '') : '';
+
 		if (!s || typeof s.enabled !== 'boolean')
 			return Promise.reject(new Error(_('Invalid recording settings')));
-		if (typeof s.path !== 'string' || s.path.charAt(0) !== '/')
-			return Promise.reject(new Error(_('The recording folder must start with a slash')));
+		if (path.charAt(0) !== '/' || path === '/')
+			return Promise.reject(new Error(_('The recording folder must be an absolute path that is not the root')));
 		if (typeof max !== 'number' || !(max >= RECORD_MAX_LO && max <= RECORD_MAX_HI) || max !== Math.floor(max))
 			return Promise.reject(new Error(_('The recording budget must be 1 to 4095 MB')));
 		uci.unload(CONF);
@@ -156,11 +210,11 @@ var api = {
 			if (uci.get(CONF, SECT) == null)
 				uci.add(CONF, 'phone', SECT);
 			uci.set(CONF, SECT, 'record_enabled', s.enabled ? '1' : '0');
-			uci.set(CONF, SECT, 'record_path', s.path);
+			uci.set(CONF, SECT, 'record_path', path);
 			uci.set(CONF, SECT, 'record_max_mb', String(Math.floor(max)));
 			return uci.save();
-		}).then(recStore).then(function() {
-			return { enabled: s.enabled, path: s.path, maxMb: Math.floor(max) };
+		}).then(storeUci).then(function() {
+			return { enabled: s.enabled, path: path, maxMb: Math.floor(max) };
 		}, function(e) { throw e && e.message ? e : fail(e); });
 	}
 };

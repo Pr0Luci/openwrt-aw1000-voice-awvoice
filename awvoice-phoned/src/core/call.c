@@ -65,6 +65,10 @@ struct phone {
 	int offered;			/* the incoming call arrived while the handset was down: it rings, and a lift answers it */
 	int refused;		/* the incoming call arrived while the handset was up, or is blocked: the caller is released and the phone does not ring */
 	int blocked;		/* ... because the blocking rules say so (it is never offered, not even when the handset goes down) */
+	int machine_answering;		/* the answering machine's answer went out: the ring is off and the call is not offered to the handset */
+	int machine_ata_ok;		/* the modem accepted that answer: the call list is only catching up, so no retry and no ring */
+	int machine_call;		/* the call in progress was answered by the machine: the handset is down and hears nothing */
+	int machine_failed;		/* the modem refused every answer of this call: the phone rings on, the machine does not ask again */
 	unsigned int tries;		/* answers (or refusals) sent for this incoming call */
 	unsigned long long tried_ms;	/* when the last one was sent */
 	int ending;			/* the hang-up was sent: the call list may still show the call for a poll or two */
@@ -204,10 +208,30 @@ static enum phone_line phone_line_of(const struct phone *p)
 	return p->ringing ? PHONE_LINE_RINGING : shown[p->state];
 }
 
+/* what the answering machine is doing with the current call */
+static int machine_state(const struct phone *p)
+{
+	if (p->machine_call)
+		return PHONE_MACHINE_ANSWERED;
+	if (p->machine_answering)
+		return PHONE_MACHINE_ANSWERING;
+	return PHONE_MACHINE_NONE;
+}
+
 static void emit(struct phone *p, enum phone_event_kind kind, unsigned long long now)
 {
 	struct phone_event ev = { .kind = kind, .line = phone_line_of(p), .call_id = p->call_id, .dir = p->dir,
-		.call = (enum call_state)p->call_seen, .at_ms = now };
+		.call = (enum call_state)p->call_seen, .machine = machine_state(p), .at_ms = now };
+
+	if (p->hooks.event)
+		p->hooks.event(p->hooks.ctx, &ev);
+}
+
+/* the answering machine's own news: the answer went out, the handset took the call, the call is over */
+static void emit_machine(struct phone *p, int why, unsigned long long now)
+{
+	struct phone_event ev = { .kind = PHONE_EV_MACHINE, .line = phone_line_of(p), .call_id = p->call_id, .dir = p->dir,
+		.call = (enum call_state)p->call_seen, .machine = why, .at_ms = now };
 
 	if (p->hooks.event)
 		p->hooks.event(p->hooks.ctx, &ev);
@@ -570,6 +594,23 @@ static void call_over(struct phone *p)
 	p->incoming = p->offered = p->refused = p->blocked = p->wait_promoted = p->recall = 0;
 	p->recall_active = p->released_one = 0;
 	p->tries = 0;
+	p->machine_failed = 0;
+}
+
+/* the answering machine's flags off; true when the call was the machine's (the front end then finishes its message).
+ * An answer that never reached the call list is dropped here, said once and without an event. */
+static int machine_clear(struct phone *p)
+{
+	const int was = p->machine_call;
+
+	if (!p->machine_call && !p->machine_answering)
+		return 0;
+	if (!p->machine_call)
+		stamped(p->log, "  channel %u: the answering machine's answer did not reach the call\n", p->ch);
+	p->machine_call = 0;
+	p->machine_answering = 0;
+	p->machine_ata_ok = 0;
+	return was;
 }
 
 /* answer the offered incoming call (ATA, 3GPP TS 27.007); a refused answer is tried again at the next call list, a few times */
@@ -595,7 +636,8 @@ static void answer_incoming(struct phone *p, unsigned int ch, FILE *log)
  *                    determined user busy). AT+CHUP on a call that is only incoming rejects it (TS 27.007 +CHUP); which
  *                    cause the network shows the caller is TO-VERIFY on this modem. A second call during a call (call
  *                    waiting, TS 22.083 / AT+CHLD) is not decided here: the call list sees only the first voice call.
- * Never answered by itself: a handset that was already up when the call came does not answer it.
+ * Never answered by itself: a handset that was already up when the call came does not answer it. The answering
+ * machine is the one deliberate exception, and only for an offered call with the handset down (on_call_state).
  */
 static void incoming_policy(struct phone *p, int hook_off, FILE *log, unsigned int ch)
 {
@@ -760,6 +802,11 @@ static void waiting_update(struct phone *p, unsigned long long now)
 		if (p->cfg.block && blocking_incoming(p->cfg.block, w->number)) {
 			w->refused = w->blocked = 1;
 			stamped(p->log, "  channel %u: a waiting call was blocked\n", p->ch);
+		} else if (p->machine_call) {
+			/* nobody is at the handset to take it, and the tone would only play into the caller's message: the waiting
+			 * caller is released as the line in use (AT+CHLD=0 leaves the machine's call alone) */
+			w->refused = 1;
+			stamped(p->log, "  channel %u: a waiting call was refused: the answering machine has the line\n", p->ch);
 		} else if (!p->cfg.call_waiting) {
 			w->refused = 1;
 			stamped(p->log, "  channel %u: a waiting call was refused: call waiting is off\n", p->ch);
@@ -1020,9 +1067,11 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 	if (p->ringing && !p->ring_end_ms && st != CALL_INCOMING && !(p->recall && st != CALL_NONE && st != CALL_GONE))
 		(void)ring_stop(c, ch, p, "the call is no longer incoming", log);
 	if (st == CALL_ACTIVE && p->state != LINE_CALL && p->hw.cleared && !p->hw.off_hook && !p->ending
+	    && !p->machine_answering
 	    && !(p->nlegs > 1 && (legs_with(p, LEG_HELD) || legs_with(p, LEG_WAITING)))
 	    && !p->released_one && !p->recall) {
 		/* the call connected after the handset went down (the answer was sent, then the caller hung up): end it.
+		 * Not while the answering machine's answer is on its way: that call is the machine's (the branch below).
 		 * Not while another call is held or waiting: then the active leg is being released on its own (AT+CHLD=1x
 		 * from the hang-up) and stays listed until the modem has done it; AT+CHUP would end them all */
 		char legs[96];
@@ -1044,6 +1093,17 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 		if (p->dir == PHONE_DIR_IN)
 			p->calls_in++;
 		call_over(p);
+	} else if (st == CALL_ACTIVE && p->state != LINE_CALL && p->machine_answering && !p->ending && !p->hw.off_hook) {
+		/* the answering machine's answer came through: the line is in a call nobody at the handset hears. The ring
+		 * is already off; the front end starts the greeting from the ANSWERED event and records the caller */
+		p->machine_call = 1;
+		p->machine_answering = 0;
+		set_line(p, LINE_CALL, now);
+		if (p->dir == PHONE_DIR_IN)
+			p->calls_in++;
+		call_over(p);
+		stamped(log, "  channel %u: the answering machine has the call\n", ch);
+		emit_machine(p, PHONE_MACHINE_ANSWERED, now);
 	} else if (st == CALL_DIALING || st == CALL_ALERTING) {
 		if (p->state == LINE_SETUP && !p->alerting) {
 			p->alerting = st == CALL_ALERTING;
@@ -1055,7 +1115,17 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 			p->setup_said = 1;
 		}
 	} else if (st == CALL_GONE) {
-		if (p->state == LINE_SETUP || p->state == LINE_CALL) {
+		const int machine_was = machine_clear(p);
+
+		if (machine_was) {
+			/* the machine's call is over: the line goes quiet at once (nobody at the handset waits for a tone),
+			 * and the front end finishes the message */
+			p->cause = p->cause_pending = p->cause_want = 0;
+			call_over(p);
+			set_line(p, LINE_IDLE, now);
+			stamped(log, "  channel %u: the answering machine's call ended\n", ch);
+			emit_machine(p, PHONE_MACHINE_ENDED, now);
+		} else if (p->state == LINE_SETUP || p->state == LINE_CALL) {
 			/* the network released the call: an outgoing attempt before the answer, or the remote ended a
 			 * connected call while the caller is still on the line -- the release tone says the line is free
 			 * again (the busy or the congestion tone, by the network's cause, asked for now) */
@@ -1083,14 +1153,49 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 				modem_cmd(p, "AT+CHUP", ch, log);
 			}
 		} else {
-			if (!hook_off && !p->ringing && p->ring_ready && p->call->ring && !p->ring_end_ms && p->state == LINE_IDLE && !(err = ring_start(c, ch, p, now, log)))
+			/* the answering machine: an offered call left alone for the delay is answered by the line itself.
+			 * Never a call that waited for the user's flash, or one ringing back from hold: the user was already
+			 * told of those. The delay counts from the call's first listing; 0 answers at once, without a ring. */
+			if (p->cfg.machine && !hook_off && p->offered && !p->recall && !p->wait_promoted
+			    && !p->machine_answering && !p->machine_failed && p->state == LINE_IDLE && !p->ring_end_ms
+			    && elapsed_ms(now, p->rec_start_ms) >= p->cfg.machine_delay_ms) {
+				p->machine_answering = 1;
+				p->machine_ata_ok = 0;
+				if (p->ringing)
+					(void)ring_stop(c, ch, p, "the answering machine answers", log);
+				stamped(log, "  channel %u: the answering machine answers (%llu ms after the call came)\n", ch,
+					elapsed_ms(now, p->rec_start_ms));
+				emit(p, PHONE_EV_MACHINE, now);
+			}
+			if (!hook_off && !p->machine_answering && !p->ringing && p->ring_ready && p->call->ring && !p->ring_end_ms
+			    && p->state == LINE_IDLE && !(err = ring_start(c, ch, p, now, log)))
 				stamped(log, "  channel %u: the phone rings for the incoming call\n", ch);
 			/* a handset lifted after the call was offered answers it; one who is dialling keeps the line */
 			if (hook_off && p->offered && p->state <= LINE_DIAL_TONE && p->tries < CALL_TRY_MAX)
 				answer_incoming(p, ch, log);
+			/* once the modem has accepted the answer the list is only catching up: no retry, no ring */
+			if (p->machine_answering && !p->machine_ata_ok) {
+				if (p->tries < CALL_TRY_MAX) {
+					answer_incoming(p, ch, log);
+				} else {
+					/* the modem never took the answer: the call goes back to the handset, and the machine leaves it alone
+					 * (it does not stop the ring again for a call it cannot answer) */
+					p->machine_answering = 0;
+					p->machine_failed = 1;
+					stamped(log, "  channel %u: the answering machine could not answer: the phone rings on\n", ch);
+				}
+			}
 		}
 	} else if (st == CALL_NONE) {
+		const int machine_was = machine_clear(p);
+
 		call_over(p);
+		if (machine_was) {
+			/* a list that drops the call without the gone step still brings the line back to idle */
+			set_line(p, LINE_IDLE, now);
+			stamped(log, "  channel %u: the answering machine's call ended\n", ch);
+			emit_machine(p, PHONE_MACHINE_ENDED, now);
+		}
 	}
 	return err;
 }
@@ -1187,6 +1292,8 @@ static void on_cmd_done(struct chip *c, unsigned int ch, struct phone *p, int re
 			stamped(log, "  channel %u: answer sent (try %u)\n", ch, p->tries);
 		else
 			stamped(log, "  channel %u: the answer was refused (try %u; %d: %s)\n", ch, p->tries, res, why);
+		if (!res && p->machine_answering)
+			p->machine_ata_ok = 1;		/* the machine's answer is taken: the list follows, and no second answer goes out */
 	} else if (!strcmp(p->mq_cmd, "AT+CHUP")) {
 		if (!res) {
 			stamped(log, "  channel %u: hang-up sent\n", ch);
@@ -1256,6 +1363,18 @@ static void modem_lost(struct chip *c, unsigned int ch, struct phone *p, unsigne
 	stamped(log, "  channel %u: the modem port was lost: no more calls are controlled until the port is open again\n", ch);
 	if (p->ringing && !p->ring_end_ms)
 		(void)ring_stop(c, ch, p, "the modem is gone", log);
+	if (p->machine_call || p->machine_answering) {
+		const int machine_was = machine_clear(p);
+
+		/* the machine's call died with the port: no tone for an empty handset, straight back to idle */
+		call_over(p);
+		set_line(p, LINE_IDLE, now);
+		if (machine_was) {
+			stamped(log, "  channel %u: the answering machine's call ended\n", ch);
+			emit_machine(p, PHONE_MACHINE_ENDED, now);
+		}
+		return;
+	}
 	if (was != LINE_CALL && was != LINE_SETUP)
 		return;
 	/* a call nobody can control any more is over for the caller: the release tone says the line is free */
@@ -1711,6 +1830,7 @@ static void recall_start(struct chip *c, unsigned int ch, struct phone *p, FILE 
 static void clear_down(struct chip *c, unsigned int ch, struct phone *p, FILE *log)
 {
 	const enum line_state was = p->state;
+	const int machine_was = machine_clear(p);
 
 	p->flash_open = 0;
 	if (was == LINE_CALL && p->nlegs > 1 && (legs_with(p, LEG_WAITING) || legs_with(p, LEG_HELD))) {
@@ -1779,6 +1899,10 @@ static void clear_down(struct chip *c, unsigned int ch, struct phone *p, FILE *l
 		p->tries = 0;
 	}
 	set_line(p, LINE_IDLE, p->step_ms);
+	if (machine_was) {
+		stamped(log, "  channel %u: the answering machine's call ended\n", ch);
+		emit_machine(p, PHONE_MACHINE_ENDED, p->step_ms);
+	}
 }
 
 /*
@@ -1801,11 +1925,32 @@ static void hook_machine(struct chip *c, unsigned int ch, struct phone *p, uint8
 	ev = hookwatch_feed(&p->hw, now, (lcr & LCR_ON_HOOK) != 0, &width);
 	switch (ev) {
 	case HW_LIFT:
-		/* the ring trip: a handset lifted while an offered call is incoming answers it now, not at the next call list
-		 * (ETSI EN 300 001: the called party's answer is the loop closing) */
-		if (p->incoming && p->offered && p->tries < CALL_TRY_MAX && p->state <= LINE_DIAL_TONE)
-			answer_incoming(p, ch, log);
-		present_dial_tone(c, ch, p, lcr, log);
+		/* the answering machine gives way the moment the handset comes up: an answer still on its way is the
+		 * caller's again, and an answered machine call carries on with the person now listening (the front end
+		 * stops the greeting and the message from the TAKEN event) */
+		{
+			const int answered = p->machine_answering && p->machine_ata_ok;
+
+			if (p->machine_answering) {
+				p->machine_answering = 0;
+				stamped(log, "  channel %u: the handset came up while the answering machine was answering: the call is the caller's\n", ch);
+			}
+			if (p->machine_call) {
+				p->machine_call = 0;
+				stamped(log, "  channel %u: the handset takes the answering machine's call\n", ch);
+				emit_machine(p, PHONE_MACHINE_TAKEN, now);
+			}
+			/* the ring trip: a handset lifted while an offered call is incoming answers it now, not at the next call list
+			 * (ETSI EN 300 001: the called party's answer is the loop closing). Not when the machine's answer is already
+			 * accepted: that would put a second ATA on the call. The machine's failed tries are not the person's: the lift
+			 * answers once more, while a call whose own answers were refused keeps its count (the machine is the only one
+			 * that retries, so its flag is the only reason to reset) */
+			if (p->machine_failed && p->incoming && p->offered && p->tries >= CALL_TRY_MAX)
+				p->tries = 0;
+			if (!answered && p->incoming && p->offered && p->tries < CALL_TRY_MAX && p->state <= LINE_DIAL_TONE)
+				answer_incoming(p, ch, log);
+			present_dial_tone(c, ch, p, lcr, log);
+		}
 		break;
 	case HW_FLASH:
 		stamped(log, "  channel %u: hook flash of %u ms\n", ch, width);
@@ -2494,6 +2639,7 @@ void phone_status(const struct phone *p, struct phone_status *st)
 	memset(st, 0, sizeof(*st));
 	st->line = phone_line_of(p);
 	st->off_hook = p->hw.off_hook;
+	st->machine = machine_state(p);
 	st->call_id = p->call_id;
 	st->dir = p->dir;
 	st->call = (enum call_state)p->call_seen;

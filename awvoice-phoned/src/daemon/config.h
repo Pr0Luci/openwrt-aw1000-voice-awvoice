@@ -34,9 +34,15 @@
  *   conference        0                          0 | 1                              allows the join of two calls (flash and 3)
  *   region            LK                         a region of the number table       how national numbers become international (core/numbers.h)
  *   hd                0                          0 | 1                              HD voice (16 kHz) is wanted; while the wideband line path is not built (while the wideband path is pending) the line stays at 8 kHz and the health reply reports hdVoice "set"
- *   record_enabled    0                          0 | 1                              1 = answered calls are recorded as WAV files (16-bit PCM, the call's own rate); off by default: a recording law may ask for an announcement
+ *   record_enabled    0                          0 | 1                              1 = calls you answer are recorded as WAV files (16-bit PCM, the call's own rate); a machine-answered call keeps its message instead (no recording after a handset take-over); off by default: a recording law may ask for an announcement
  *   record_max_mb     50                         1..4095                            the recordings directory's budget; when it is passed the oldest files are deleted before a new one starts
- *   record_path       /etc/awvoice/recordings    a directory                        where the WAV files land; a mount can be named for more room
+ *   record_path       /etc/awvoice/recordings    a directory                        where the WAV files land; a mount can be named for more room; trailing slashes go, the root is refused, and a /mnt folder is used only once its drive is mounted
+ *   machine_enabled   0                          0 | 1                              1 = an unanswered incoming call is answered by the answering machine after machine_delay (the cellular leg only); a message folder that cannot take a file keeps the machine from answering, and the handset rings on
+ *   machine_greeting  /etc/awvoice/greeting.wav  a readable file                    the greeting: a 16-bit PCM WAV, mono or stereo, at 8000 or 16000 Hz; a file that is not one switches the machine off (one log line)
+ *   machine_delay     10                         0..60 s                            the wait before the machine answers, counted from the call's first listing; 0 answers at once
+ *   machine_path      /etc/awvoice/messages      a directory                        where the messages land; a mount can be named for more room; never the recordings' folder, and a /mnt folder is used only once its drive is mounted
+ *   machine_max_mb    50                         1..4095                            the messages directory's budget (the call recordings have their own)
+ *   machine_max_s     120                        10..600 s                          the longest message; the call is ended when it is reached
  *
  * Shared with the phone page, read by the daemon in M5 (listed so the names stay fixed; the page's DESIGN.md §2 and §5 give
  * their ranges): mic_gain_db,
@@ -82,9 +88,15 @@ struct aw_config {
 	unsigned int ring_rate_ms;	/* the indicator's fast blink (an incoming call), 100..3000 */
 	unsigned int offhook_rate_ms;	/* the indicator's slow blink (the handset up), 200..10000 */
 	int hd;				/* 1 = HD voice (16 kHz) is wanted; the wideband path is pending (see the table above) */
-	int record_enabled;		/* 1 = answered calls are recorded as WAV files (opt-in: a recording law may ask for an announcement) */
+	int record_enabled;		/* 1 = calls you answer are recorded as WAV files (a machine-answered call keeps its message; no recording after a take-over; opt-in: a recording law may ask for an announcement) */
 	unsigned int record_max_mb;	/* the recordings directory's budget in MB; the oldest files go first */
 	char record_path[AW_CONFIG_PATH_MAX];	/* where the WAV files land; a mount can be named for more room */
+	int machine_enabled;		/* 1 = the answering machine may answer an offered incoming call (machine.h loads the greeting) */
+	char machine_greeting[AW_CONFIG_PATH_MAX];	/* the greeting WAV; an invalid file switches the machine off */
+	unsigned int machine_delay_s;	/* the wait before the machine answers, 0..60 s */
+	char machine_path[AW_CONFIG_PATH_MAX];	/* where the messages land */
+	unsigned int machine_max_mb;	/* the messages directory's budget in MB */
+	unsigned int machine_max_s;	/* the longest message in seconds; the call ends when it is reached */
 };
 
 /* the defaults above */

@@ -34,6 +34,7 @@ struct calllog_entry {
 	enum phone_result result;
 	int cause;			/* TS 24.008, 0 = unknown */
 	char recording[48];		/* the recording's file name in the recordings directory, "" = none */
+	char message[48];		/* the answering machine's message file name in the messages directory, "" = none */
 };
 
 struct calllog {
@@ -55,8 +56,10 @@ int calllog_type_parse(const char *text, enum calllog_type *t);
 /* an incoming call that was not answered is MISS (missed, rejected, blocked all show as in the contract: only `missed` is MISS), else IN; outgoing is OUT */
 enum calllog_type calllog_type_of(enum phone_dir dir, enum phone_result r);
 
-/* add the finished call (newest first; the 201st oldest is dropped); marks both copies changed */
-void calllog_add(struct calllog *l, const struct phone_call_record *rec, unsigned long long ts_epoch_s, const char *recording);
+/* add the finished call (newest first; the 201st oldest is dropped); marks both copies changed. `recording` and
+ * `message` are the files' names ("" = none): the call's own recording, or the answering machine's message */
+void calllog_add(struct calllog *l, const struct phone_call_record *rec, unsigned long long ts_epoch_s,
+		 const char *recording, const char *message);
 
 /* remove every record, or only those of one type; the number removed */
 unsigned int calllog_delete(struct calllog *l, const enum calllog_type *only);

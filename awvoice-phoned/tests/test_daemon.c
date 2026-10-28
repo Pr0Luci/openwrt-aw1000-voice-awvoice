@@ -56,6 +56,7 @@ struct rig {
 	int refuse_atd;				/* the modem answers ERROR to a dial */
 	int refuse_chld1;			/* ... to AT+CHLD=1x */
 	int refuse_ccfc;			/* ... to a forwarding registration */
+	int refuse_ata;				/* ... to an answer */
 };
 
 /* the fake modem's callbacks reach the rig of the running test: one rig at a time */
@@ -79,6 +80,8 @@ static int list_act(void *user, const char *what)
 	if (r->refuse_chld1 && !strncmp(what, "AT+CHLD=1", 9))
 		return -EIO;
 	if (r->refuse_ccfc && !strncmp(what, "AT+CCFC=2,3", 11))
+		return -EIO;
+	if (r->refuse_ata && !strcmp(what, "ATA"))
 		return -EIO;
 	return r->refuse_atd && !strncmp(what, "ATD", 3) ? -EIO : 0;
 }
@@ -637,6 +640,189 @@ static void test_ring_trip_answers_at_once(void)
 	r.listed = CALL_ACTIVE;
 	run_ms(&r, 1500);
 	assert(status_of(&r).line == PHONE_LINE_CALL && status_of(&r).dir == PHONE_DIR_IN);
+	rig_close(&r);
+}
+
+/*
+ * The answering machine: an offered call left alone for the delay is answered by the line itself, with the handset down.
+ * The call is nobody's at the handset (it never rings again, a lift takes it over, no tone follows the caller's hang-up),
+ * and a blocked caller, a busy line or a ring test is never answered by it. The core runs only the state machine and the
+ * events; the greeting and the message are the front end's (the ANSWERING / ANSWERED / TAKEN / ENDED events).
+ */
+static void machine_rig(struct rig *r, unsigned int delay_ms)
+{
+	rig_init(r);
+	r->cfg.machine = 1;
+	r->cfg.machine_delay_ms = delay_ms;
+	rig_open(r);
+}
+
+static struct blocking *rules(const char *in, const char *out, int anonymous);
+
+static unsigned int machine_events(const struct rig *r, int why)
+{
+	unsigned int k, n = 0;
+
+	for (k = 0; k < r->ev_count && k < EVENTS_MAX; k++)
+		n += r->ev[k].kind == PHONE_EV_MACHINE && r->ev[k].machine == why;
+	return n;
+}
+
+static void test_machine_answer(void)
+{
+	struct rig r;
+	struct phone_status st;
+	struct blocking *b;
+
+	/* off (the default): the phone rings and nothing answers by itself */
+	rig_init(&r);
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 6000);
+	assert(acts_of(&r, "ATA") == 0 && status_of(&r).machine == PHONE_MACHINE_NONE && status_of(&r).line == PHONE_LINE_RINGING);
+	assert(count_in(log_text(&r), "the answering machine") == 0);
+	rig_close(&r);
+
+	/* delay 0: answered at once, no ring; the answer reaches the call; no hang-up follows; the caller's end is silent */
+	machine_rig(&r, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1200);
+	assert(acts_of(&r, "ATA") == 1 && count_in(log_text(&r), "the answering machine answers (") == 1);
+	assert(status_of(&r).machine == PHONE_MACHINE_ANSWERING && status_of(&r).line == PHONE_LINE_IDLE);
+	assert(count_in(log_text(&r), "the phone rings for the incoming call") == 0 && machine_events(&r, PHONE_MACHINE_ANSWERING) == 1);
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 1500);			/* the call list catches up */
+	st = status_of(&r);
+	assert(st.machine == PHONE_MACHINE_ANSWERED && st.line == PHONE_LINE_CALL && st.calls_in == 1 && st.dir == PHONE_DIR_IN);
+	assert(acts_of(&r, "AT+CHUP") == 0 && acts_of(&r, "ATA") == 1);	/* the answer is not a hang-up, and is never repeated */
+	assert(count_in(log_text(&r), "the answering machine has the call") == 1);
+	assert(count_in(log_text(&r), "the phone rings for the incoming call") == 0);
+	assert(machine_events(&r, PHONE_MACHINE_ANSWERED) == 1 && !strstr(log_text(&r), "5551"));
+	r.listed = CALL_GONE;			/* the caller ended it */
+	run_ms(&r, 1200);
+	st = status_of(&r);
+	assert(st.line == PHONE_LINE_IDLE && st.machine == PHONE_MACHINE_NONE && !st.off_hook);
+	assert(machine_events(&r, PHONE_MACHINE_ENDED) == 1 && count_in(log_text(&r), "the answering machine's call ended") == 1);
+	assert(!strstr(log_text(&r), "the busy tone") && !strstr(log_text(&r), "the congestion tone"));	/* nobody at the handset waits for a tone */
+	r.listed = CALL_NONE;
+	run_ms(&r, 1200);
+	assert(r.rec_count == 1 && r.rec[0].dir == PHONE_DIR_IN && r.rec[0].answered_ms && r.rec[0].result == PHONE_RES_ANSWERED);
+	/* the machine can take the next call too, with a new id */
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1500);
+	assert(acts_of(&r, "ATA") == 2 && status_of(&r).call_id == 2 && status_of(&r).machine == PHONE_MACHINE_ANSWERING);
+	r.listed = CALL_NONE;			/* the caller gave up before the answer was listed: nothing is recorded twice */
+	run_ms(&r, 1200);
+	assert(status_of(&r).line == PHONE_LINE_IDLE && status_of(&r).machine == PHONE_MACHINE_NONE);
+	assert(count_in(log_text(&r), "the answering machine's answer did not reach the call") == 1);
+	assert(machine_events(&r, PHONE_MACHINE_ENDED) == 1);	/* no message was begun: no end for it */
+	assert(r.rec_count == 2 && r.rec[1].result == PHONE_RES_MISSED);
+	rig_close(&r);
+
+	/* the delay is counted from the call's first listing: the phone rings first, the machine answers later */
+	machine_rig(&r, 4000);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 2500);
+	assert(acts_of(&r, "ATA") == 0 && status_of(&r).machine == PHONE_MACHINE_NONE && status_of(&r).line == PHONE_LINE_RINGING);
+	assert(count_in(log_text(&r), "the phone rings for the incoming call") == 1);
+	run_ms(&r, 3000);
+	assert(acts_of(&r, "ATA") == 1 && status_of(&r).machine == PHONE_MACHINE_ANSWERING);
+	assert(count_in(log_text(&r), "the answering machine answers (") == 1);
+	assert(count_in(log_text(&r), "ring stopped (the answering machine answers)") == 1);
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 1500);
+	assert(status_of(&r).machine == PHONE_MACHINE_ANSWERED && status_of(&r).line == PHONE_LINE_CALL);
+	rig_close(&r);
+
+	/* the handset takes the call over: the machine gives way, the call carries on, and no second answer goes out */
+	machine_rig(&r, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1200);
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 1500);
+	assert(status_of(&r).machine == PHONE_MACHINE_ANSWERED);
+	handset(&r, 1);
+	run_ms(&r, 300);
+	st = status_of(&r);
+	assert(st.machine == PHONE_MACHINE_NONE && st.line == PHONE_LINE_CALL && acts_of(&r, "ATA") == 1);
+	assert(count_in(log_text(&r), "the handset takes the answering machine's call") == 1 && machine_events(&r, PHONE_MACHINE_TAKEN) == 1);
+	run_ms(&r, 2000);			/* the person's call: no hang-up, no tone */
+	assert(acts_of(&r, "AT+CHUP") == 0 && status_of(&r).line == PHONE_LINE_CALL);
+	r.listed = CALL_GONE;			/* the caller ended it: now the person at the handset gets the release tone */
+	run_ms(&r, 1200);
+	assert(status_of(&r).line == PHONE_LINE_RELEASE && strstr(log_text(&r), "the remote ended the call"));
+	handset(&r, 0);
+	run_ms(&r, 1200);
+	assert(status_of(&r).line == PHONE_LINE_IDLE);
+	rig_close(&r);
+
+	/* a handset up when the call comes: the line is in use, the caller is released, the machine is not involved */
+	machine_rig(&r, 0);
+	handset(&r, 1);
+	run_ms(&r, 300);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 2500);
+	assert(acts_of(&r, "ATA") == 0 && acts_of(&r, "AT+CHUP") >= 1 && status_of(&r).machine == PHONE_MACHINE_NONE);
+	assert(count_in(log_text(&r), "incoming call refused: the line is in use") == 1 && count_in(log_text(&r), "the answering machine") == 0);
+	rig_close(&r);
+
+	/* a blocked caller is released before any answer, the machine included */
+	b = rules("5551", NULL, 0);
+	rig_init(&r);
+	r.cfg.machine = 1;
+	r.cfg.block = b;
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 2500);
+	assert(acts_of(&r, "ATA") == 0 && acts_of(&r, "AT+CHUP") >= 1 && status_of(&r).machine == PHONE_MACHINE_NONE);
+	assert(count_in(log_text(&r), "an incoming call was blocked") == 1 && count_in(log_text(&r), "the answering machine") == 0);
+	r.listed = CALL_NONE;
+	run_ms(&r, 1200);
+	assert(r.rec_count == 1 && r.rec[0].result == PHONE_RES_BLOCKED && !strstr(log_text(&r), "5551"));
+	rig_close(&r);
+	free(b);
+
+	/* every answer refused: the machine gives up once, the phone rings on, and the lift still answers */
+	machine_rig(&r, 0);
+	r.refuse_ata = 1;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 6000);
+	assert(acts_of(&r, "ATA") == 3 && count_in(log_text(&r), "the answering machine could not answer: the phone rings on") == 1);
+	assert(status_of(&r).machine == PHONE_MACHINE_NONE && status_of(&r).line == PHONE_LINE_RINGING);
+	assert(count_in(log_text(&r), "the answering machine answers (") == 1);
+	run_ms(&r, 4000);			/* it does not stop the ring again for a call it cannot answer */
+	assert(acts_of(&r, "ATA") == 3 && count_in(log_text(&r), "the answering machine answers (") == 1);
+	handset(&r, 1);
+	run_ms(&r, 300);
+	assert(acts_of(&r, "ATA") == 4);	/* the machine's failed tries are not the person's */
+	rig_close(&r);
+}
+
+static void test_machine_waiting(void)
+{
+	struct rig r;
+
+	/* a second call while the machine has the line: refused (the line is in use), no waiting tone into the message */
+	rig_init(&r);
+	r.ops.legs = fm_legs;
+	r.cfg.machine = 1;
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	r.fm.legs[0] = (struct call_leg){ .idx = 1, .dir = 1, .stat = LEG_INCOMING, .number = "5551" };
+	r.fm.nlegs = 1;
+	run_ms(&r, 1500);
+	r.listed = CALL_ACTIVE;
+	r.fm.legs[0].stat = LEG_ACTIVE;
+	run_ms(&r, 1500);
+	assert(status_of(&r).machine == PHONE_MACHINE_ANSWERED && status_of(&r).line == PHONE_LINE_CALL);
+	r.act_count = 0;
+	r.fm.legs[1] = (struct call_leg){ .idx = 2, .dir = 1, .stat = LEG_WAITING, .number = "5552" };
+	r.fm.nlegs = 2;
+	run_ms(&r, 1500);
+	assert(acts_of(&r, "AT+CHLD=0") >= 1 && count_in(log_text(&r), "a waiting call was refused: the answering machine has the line") == 1);
+	assert(count_in(log_text(&r), "the waiting tone sounds") == 0 && count_in(log_text(&r), "a call is waiting") == 0);
+	assert(status_of(&r).machine == PHONE_MACHINE_ANSWERED && status_of(&r).line == PHONE_LINE_CALL && status_of(&r).leg_count == 2);
+	assert(!strstr(log_text(&r), "5552"));
 	rig_close(&r);
 }
 
@@ -2602,6 +2788,8 @@ int main(void)
 	test_late_step();
 	test_busy_line_refuses();
 	test_ring_trip_answers_at_once();
+	test_machine_answer();
+	test_machine_waiting();
 	test_modem_timeouts();
 	test_idle_questions();
 	test_dtmf_in_call();
