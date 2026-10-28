@@ -46,8 +46,8 @@ jobs:
 
           - awvoice-phoned $ver-r1: the phone daemon.
           - kmod-awvoice-fxs 6.12.94.$ver-r1: the line-chip module, built for kernel 6.12.94.
-          - luci-app-awvoice $ver-r1: the LuCI page (Services - AWvoice(RJ11)). It moves
-            from 0.1.0 to $ver with this release, so one number names the whole set.
+          - luci-app-awvoice $ver-r1: the LuCI page (Services - AWvoice(RJ11)); the three
+            packages share one number from 1.1.0 on.
 
           Install all three from this release, then reboot: the module and the daemon are
           a matched pair, and a module that is already loaded stays loaded until a reboot.
@@ -57,8 +57,6 @@ jobs:
 
           The packages are not signed yet, hence --allow-untrusted. SHA256SUMS holds their
           checksums; build-info.txt names the commit and the SDK the build came from.
-
-          Known issue: caller id on some handsets does not arrive (see the open caller-id issue).
           NOTES
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
