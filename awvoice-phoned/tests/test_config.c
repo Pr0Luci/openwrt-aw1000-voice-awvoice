@@ -63,6 +63,8 @@ static unsigned int get_fmin(const struct aw_config *c) { return c->flash_min_ms
 static unsigned int get_fmax(const struct aw_config *c) { return c->flash_max_ms; }
 static unsigned int get_pause(const struct aw_config *c) { return c->dial_pause_s; }
 static unsigned int get_trace(const struct aw_config *c) { return (unsigned int)c->level_trace; }
+static unsigned int get_record_enabled(const struct aw_config *c) { return (unsigned int)c->record_enabled; }
+static unsigned int get_record_max(const struct aw_config *c) { return c->record_max_mb; }
 
 static void test_defaults(void)
 {
@@ -80,6 +82,8 @@ static void test_defaults(void)
 	assert(c.my_number[0] == 0);
 	assert(!strcmp(c.region, "LK"));
 	assert(c.clir == 0 && !c.hotline_number[0] && c.hotline_delay_s == 10);
+	assert(c.record_enabled == 0 && c.record_max_mb == 50);
+	assert(!strcmp(c.record_path, "/etc/awvoice/recordings"));
 }
 
 static void test_ranges(void)
@@ -91,6 +95,37 @@ static void test_ranges(void)
 	edge("flash_max_ms", 300, 3000, get_fmax);
 	edge("dial_pause_s", 3, 15, get_pause);
 	edge("level_trace", 0, 1, get_trace);
+	edge("record_enabled", 0, 1, get_record_enabled);
+	edge("record_max_mb", 1, 4095, get_record_max);
+}
+
+/* recording is off until it is switched on (a recording law may ask for an announcement); the path is absolute */
+static void test_recording_options(void)
+{
+	struct aw_config c, ref;
+	char longpath[AW_CONFIG_PATH_MAX + 2];
+	FILE *f = log_open();
+
+	config_defaults(&ref);
+	config_defaults(&c);
+	assert(c.record_enabled == 0 && c.record_max_mb == 50);
+	assert(!strcmp(c.record_path, "/etc/awvoice/recordings"));
+	edge("record_enabled", 0, 1, get_record_enabled);
+	edge("record_max_mb", 1, 4095, get_record_max);
+	config_defaults(&c);
+	assert(config_set(&c, "record_enabled", "1", f) == 0 && c.record_enabled == 1);
+	assert(config_set(&c, "record_enabled", "2", f) == -EINVAL && c.record_enabled == 1);
+	assert(config_set(&c, "record_path", "/mnt/usb/rec", f) == 0 && !strcmp(c.record_path, "/mnt/usb/rec"));
+	assert(config_set(&c, "record_path", "recordings", f) == -EINVAL && !strcmp(c.record_path, "/mnt/usb/rec"));	/* absolute paths only */
+	assert(config_set(&c, "record_path", "", f) == -EINVAL);
+	memset(longpath, 'a', AW_CONFIG_PATH_MAX - 1);
+	longpath[0] = '/';
+	longpath[AW_CONFIG_PATH_MAX - 1] = 0;
+	assert(config_set(&c, "record_path", longpath, f) == 0 && strlen(c.record_path) == AW_CONFIG_PATH_MAX - 1);
+	longpath[AW_CONFIG_PATH_MAX - 1] = 'a';
+	longpath[AW_CONFIG_PATH_MAX] = 0;
+	assert(config_set(&c, "record_path", longpath, f) == -EINVAL);
+	fclose(f);
 }
 
 static void test_choices(void)
@@ -297,6 +332,7 @@ int main(void)
 	test_region();
 	test_clir_hotline();
 	test_waiting_options();
+	test_recording_options();
 	test_unknown_names();
 	test_cross_rule();
 	free(log_buf);

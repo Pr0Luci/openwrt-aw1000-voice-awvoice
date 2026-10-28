@@ -364,12 +364,12 @@ static void test_calls(void)
 	begin(&j, &sink);
 	reply_calls(&sink, l, NULL);
 	assert(!strcmp(end(&j), "{\"calls\":[]}"));
-	calllog_add(l, &a, 1700000000);
-	calllog_add(l, &o, 1700000100);
+	calllog_add(l, &a, 1700000000, NULL);
+	calllog_add(l, &o, 1700000100, NULL);
 	begin(&j, &sink);
 	reply_calls(&sink, l, NULL);
-	assert(!strcmp(end(&j), "{\"calls\":[{\"id\":2,\"type\":\"OUT\",\"number\":\"45\",\"name\":\"\",\"ts\":1700000100,\"durationSec\":0,\"result\":\"busy\",\"cause\":17},"
-		"{\"id\":1,\"type\":\"IN\",\"number\":\"5551\",\"name\":\"\",\"ts\":1700000000,\"durationSec\":65,\"result\":\"answered\",\"cause\":0}]}"));
+	assert(!strcmp(end(&j), "{\"calls\":[{\"id\":2,\"type\":\"OUT\",\"number\":\"45\",\"name\":\"\",\"ts\":1700000100,\"durationSec\":0,\"recording\":\"\",\"result\":\"busy\",\"cause\":17},"
+		"{\"id\":1,\"type\":\"IN\",\"number\":\"5551\",\"name\":\"\",\"ts\":1700000000,\"durationSec\":65,\"recording\":\"\",\"result\":\"answered\",\"cause\":0}]}"));
 	/* with a phone book the record carries the contact's name */
 	phonebook_clear(&pb, NULL);
 	assert(!phonebook_add(&pb, "Ann", nums, 1, NULL, stderr));

@@ -12,6 +12,9 @@
 #include <linux/awvoice-fxs.h>
 
 #include "window.h"
+#include "tap_ring.h"
+
+#define AWFXS_TAP_FRAMES	8192	/* capture ring capacity in frames, power of two: about one second of narrowband audio */
 
 /*
  * Register blocks are described as overlay structures; a pointer to the first byte of the block is cast
@@ -157,11 +160,18 @@ struct awfxs {
 	bool gates_saved;
 	u32 gate_was, zsi_gate_was;	/* clock gates as found, restored on unload */
 
-	struct task_struct *bridge_task;
+		struct task_struct *bridge_task;
 	struct awfxs_bridge bridge;
 	struct awfxs_bridge_stats bridge_stats;
 	struct level_window modem_window;	/* the running window of the modem's sample peaks (the bridge thread's) */
 	unsigned int bridge_slots;
+
+	struct awfxs_tap {
+		bool on;		/* armed by AWFXS_IOC_TAP_SET; disarms on every bridge stop / restart */
+		u32 generation;		/* bumped on every bridge stop / restart; readers re-arm on a change */
+		struct awfxs_tap_ring ring;
+		struct awfxs_tap_frame slot[AWFXS_TAP_FRAMES];
+	} tap;
 
 	struct timer_list wd_timer;
 	unsigned long wd_flags;		/* AW_WD_* bits, touched from the timer too */
@@ -188,6 +198,11 @@ int awfxs_spi(struct awfxs *z, struct awfxs_spi *x);
 int awfxs_bridge_set(struct awfxs *z, const struct awfxs_bridge *b);
 void awfxs_bridge_stop(struct awfxs *z);
 void awfxs_bridge_stats(struct awfxs *z, struct awfxs_bridge_stats *s);
+
+/* bridge.c: the capture tap (armed reads mirror every bridge frame into the ring) */
+void awfxs_tap_disarm(struct awfxs *z);
+int awfxs_tap_set(struct awfxs *z, u32 on);
+void awfxs_tap_fill_read(struct awfxs *z, struct awfxs_tap_read *r, struct awfxs_tap_frame *frames);
 
 /* watchdog.c: keeps the chip in a safe state when nobody is looking after the line */
 void awfxs_wd_init(struct awfxs *z);

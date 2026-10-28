@@ -523,7 +523,8 @@ return baseclass.extend({
 			return list.map(function(c) {
 				return {
 					id: num(c.id), type: c.type === 'OUT' || c.type === 'MISS' ? c.type : 'IN', number: str(c.number), name: str(c.name),
-					ts: num(c.ts) || 0, durationSec: Math.max(0, num(c.durationSec) || 0), result: str(c.result), cause: num(c.cause) || 0
+					ts: num(c.ts) || 0, durationSec: Math.max(0, num(c.durationSec) || 0), recording: str(c.recording),
+					result: str(c.result), cause: num(c.cause) || 0
 				};
 			});
 		}, function(e) { throw fail(e); });

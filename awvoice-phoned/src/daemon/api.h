@@ -54,6 +54,7 @@ struct api_ctx {
 	const struct phonebook *book;	/* the phone book, for the names in the call log reply (may be NULL) */
 	struct phone *phone;		/* NULL while the line is not in service (status then reports state "down") */
 	const char *port;		/* the modem port in use, "" when none */
+	const char *record_path;	/* awvoice.record_path, where the call recordings live ("" = none listed) */
 	const struct indicator *ind;	/* the phone LED's state, for the health reply (may be NULL: none yet) */
 	int hd;				/* the HD voice state for the health reply: 0 off, 1 wanted, 2 on */
 	char leds_buf[2048];		/* the /sys/class/leds names for the health reply, filled at the reply */

@@ -41,6 +41,8 @@ void config_defaults(struct aw_config *c)
 	c->call_waiting = 1;
 	c->ring_rate_ms = RING_RATE_DEFAULT_MS;
 	c->offhook_rate_ms = OFFHOOK_RATE_DEFAULT_MS;
+	c->record_max_mb = 50;
+	snprintf(c->record_path, sizeof(c->record_path), "%s", "/etc/awvoice/recordings");
 }
 
 /* a whole decimal number in [low, high]: no sign, no space, no trailing text */
@@ -218,6 +220,18 @@ int config_set(struct aw_config *c, const char *name, const char *value, FILE *l
 		if (!number_in(value, 0, 1, &v))
 			return bad(log, name);
 		c->hd = (int)v;
+	} else if (!strcmp(name, "record_enabled")) {
+		if (!number_in(value, 0, 1, &v))
+			return bad(log, name);
+		c->record_enabled = (int)v;
+	} else if (!strcmp(name, "record_max_mb")) {
+		if (!number_in(value, 1, 4095, &v))	/* 4096 MB does not fit the byte budget's 32 bits */
+			return bad(log, name);
+		c->record_max_mb = v;
+	} else if (!strcmp(name, "record_path")) {
+		if (value[0] != '/' || strlen(value) >= sizeof(c->record_path))
+			return bad(log, name);
+		snprintf(c->record_path, sizeof(c->record_path), "%s", value);
 	} else {
 		return -ENOENT;
 	}

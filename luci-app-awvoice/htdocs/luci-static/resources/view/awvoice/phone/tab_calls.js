@@ -7,7 +7,8 @@
 /*
  * tab_calls.js - Calls tab: call history with type filter, search, date filter, CSV export, clear per type and a
  * detail view (side panel on wide containers, inline under the tapped row on narrow ones; the CSS decides which one
- * is visible, so both are rendered).
+ * is visible, so both are rendered). Under the call list sits the Recordings card: what the daemon kept, played and
+ * deleted here.
  *
  * Also exports row() so the Overview "Last calls" list looks the same. The call log is a later milestone: while
  * api.available.listCalls is false the tab shows a note and every control is disabled.
@@ -52,6 +53,160 @@ function csvCell(v) {
 	if (/^[=+\-@\t\r]/.test(s))
 		s = "'" + s;
 	return '"' + s.replace(/"/g, '""') + '"';
+}
+
+/* a recording's name leads with its epoch (digits and dashes, ending .wav) */
+function recWhen(name) {
+	var ts = parseInt(String(name).replace(/\.wav$/, '').split('-')[0], 10);
+	return isNaN(ts) ? null : ts;
+}
+
+function fmtSize(bytes) {
+	return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' ' + _('MB') : Math.max(1, Math.round(bytes / 1024)) + ' ' + _('KB');
+}
+
+/* the canonical 44-byte WAV header of the daemon's recording core: 16-bit mono PCM, little-endian fields */
+/* the recording travels as the exact file on the storage: the chunks are its bytes,
+ * header included - the page assembles and never builds a header itself. */
+
+function b64Bytes(b64) {
+	var bin = atob(b64), out = new Uint8Array(bin.length), i;
+	for (i = 0; i < bin.length; i++)
+		out[i] = bin.charCodeAt(i);
+	return out;
+}
+
+/* the raw length of one base64 chunk: the contract's way to name the next offset */
+function b64RawLen(b64) {
+	return b64.length / 4 * 3 - (b64.length - b64.replace(/=+$/, '').length);
+}
+
+/* ---- call recordings: the files live on the router's storage; the page fetches, plays, saves and deletes ---- */
+
+var recList = null, recBusy = null, recPlaying = null, recAudio = null, recUrl = null, recNotify = null;
+
+/* a recording belongs to the call whose id and start time its name carries */
+function recFor(c) {
+	if (!recList || !c.recording)
+		return null;
+	for (var k = 0; k < recList.length; k++)
+		if (recList[k].name.replace(/\.wav$/, '') === c.recording.replace(/\.wav$/, ''))
+			return recList[k];
+	return null;
+}
+
+function recRefresh(ctx) {
+	return ctx.api.listRecordings().then(function(list) { recList = list; },
+		function(e) { recList = []; ctx.toast(e.message); });
+}
+
+/* one headless audio element for the whole tab: redraws move the buttons, never the sound */
+function recAudioFor(url) {
+	if (!recAudio) {
+		recAudio = new window.Audio();
+		recAudio.addEventListener('ended', function() { recPlaying = null; if (recNotify) recNotify(); });
+	}
+	if (recAudio.src !== url)
+		recAudio.src = url;
+	return recAudio;
+}
+
+/* the chunks are fetched one after another until a reply says no more follow */
+function recFetchAll(ctx, rec) {
+	var parts = [];
+	function next(offset) {
+		return ctx.api.getRecording(rec.name, offset).then(function(c) {
+			parts.push(b64Bytes(c.b64));
+			return c.more ? next(c.offset + b64RawLen(c.b64)) : { total: c.total || rec.bytes, parts: parts };
+		});
+	}
+	return next(0);
+}
+
+/* the recording's own button: Play or Pause while it sounds, Loading while the chunks travel */
+function recButton(ctx, rec) {
+	var u = ctx.ui;
+	var busy = recBusy === rec.name,
+		playing = recPlaying === rec.name && recAudio && !recAudio.paused;
+
+	return u.button(busy ? _('Loading…') : playing ? _('Pause') : _('Play'),
+		playing && !busy ? 'pause' : 'play', busy ? 'av-busy cbi-button-action' : 'cbi-button-action',
+		function() { recPlayPause(ctx, rec); });
+}
+
+function recPlayPause(ctx, rec) {
+	if (recBusy === rec.name)
+		return;
+	if (recPlaying === rec.name && recAudio) {
+		if (recAudio.paused)
+			recAudio.play();
+		else
+			recAudio.pause();
+		if (recNotify) recNotify();
+		return;
+	}
+	recBusy = rec.name;
+	if (recNotify) recNotify();
+	recFetchAll(ctx, rec).then(function(wav) {
+		recUrl = URL.createObjectURL(new Blob(wav.parts, { type: 'audio/wav' }));
+		recAudioFor(recUrl);
+		recAudio.play().catch(function() {});
+		recPlaying = rec.name;
+		recBusy = null;
+		if (recNotify) recNotify();
+	}, function(e) {
+		recBusy = null;
+		if (recNotify) recNotify();
+		ctx.toast(e.message);
+	});
+}
+
+/* the file travels as a browser download; the card redraws on every state change, so the busy flag alone guards it */
+function recSave(ctx, rec) {
+	if (recBusy === rec.name)
+		return;
+	recBusy = rec.name;
+	if (recNotify) recNotify();
+	recFetchAll(ctx, rec).then(function(wav) {
+		recUrl = URL.createObjectURL(new Blob(wav.parts, { type: 'audio/wav' }));
+		var a = E('a', { 'href': recUrl, 'download': rec.name });
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+		setTimeout(function() { URL.revokeObjectURL(recUrl); }, 1000);
+		recBusy = null;
+		if (recNotify) recNotify();
+	}, function(e) {
+		recBusy = null;
+		if (recNotify) recNotify();
+		ctx.toast(e.message);
+	});
+}
+
+function recDelete(ctx, rec) {
+	if (recPlaying === rec.name || recBusy === rec.name)
+		recStop();
+	editors.confirm(ctx, _('Delete recording'), _('Delete this recording? This cannot be undone.'), _('Delete'),
+		function() {
+			ctx.api.deleteRecording(rec.name).then(function() {
+				recList = null;
+				recRefresh(ctx).then(function() { if (recNotify) recNotify(); });
+				if (recNotify) recNotify();
+				ctx.toast(_('Recording deleted'));
+			}, function(e) { ctx.toast(e.message); });
+		});
+}
+
+function recStop() {
+	if (recAudio) {
+		recAudio.pause();
+		recAudio.src = '';
+	}
+	if (recUrl)
+		URL.revokeObjectURL(recUrl);
+	recUrl = null;
+	recPlaying = null;
+	recBusy = null;
 }
 
 return baseclass.extend({
@@ -113,6 +268,8 @@ return baseclass.extend({
 				acts.push(blockBtn(c));
 			}
 
+			var rec = recFor(c);
+
 			return E('div', [
 				E('h3', [
 					callIcon(u, c),
@@ -125,7 +282,13 @@ return baseclass.extend({
 				u.kv(_('Date'), u.fmtWhen(c.ts)),
 				u.kv(_('Duration'), u.fmtDuration(c.durationSec), 'av-mono'),
 				u.kv(_('Result'), resultLabel(c.result) + (cause ? ' - ' + cause : '')),
-				E('div', { 'class': 'av-acts' }, acts)
+				u.kv(_('Recording'), rec ? u.fmtDuration(rec.seconds) + ' - ' + fmtSize(rec.bytes)
+					+ (rec.channels == 2 ? ' - ' + _('stereo') : '') : _('None')),
+				E('div', { 'class': 'av-acts' }, acts.concat(rec ? [
+					recButton(ctx, rec),
+					u.button(_('Save'), 'download', 'cbi-button-action', function() { recSave(ctx, rec); }),
+					u.button(_('Delete'), 'trash', 'cbi-button-remove important', function() { recDelete(ctx, rec); })
+				] : []))
 			]);
 		}
 
@@ -237,7 +400,21 @@ return baseclass.extend({
 		from.addEventListener('change', redraw);
 		ctx.on('contacts', redraw);
 		ctx.on('select', function(id) { sel = id; redraw(); });
-		ctx.on('calls', redraw);
+		/* a recording file lands on the storage when its call ends: when the reloaded log carries
+		 * one this tab has not seen, refetch the list first so the detail card links it at once */
+		ctx.on('calls', function() {
+			var fresh = ctx.calls.some(function(c) {
+				return c.recording && !(recList || []).some(function(r) {
+					return r.name.replace(/\.wav$/, '') === c.recording.replace(/\.wav$/, '');
+				});
+			});
+			if (fresh)
+				recRefresh(ctx).then(redraw, redraw);
+			redraw();
+		});
+		ctx.on('recordings', redraw);
+		recNotify = function() { redraw(); };
+		recRefresh(ctx);
 
 		return E('div', [ u.off([
 			chips,

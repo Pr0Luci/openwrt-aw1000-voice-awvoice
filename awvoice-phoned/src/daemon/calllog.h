@@ -33,6 +33,7 @@ struct calllog_entry {
 	unsigned int duration_s;	/* seconds of speech (0 = not answered) */
 	enum phone_result result;
 	int cause;			/* TS 24.008, 0 = unknown */
+	char recording[48];		/* the recording's file name in the recordings directory, "" = none */
 };
 
 struct calllog {
@@ -55,7 +56,7 @@ int calllog_type_parse(const char *text, enum calllog_type *t);
 enum calllog_type calllog_type_of(enum phone_dir dir, enum phone_result r);
 
 /* add the finished call (newest first; the 201st oldest is dropped); marks both copies changed */
-void calllog_add(struct calllog *l, const struct phone_call_record *rec, unsigned long long ts_epoch_s);
+void calllog_add(struct calllog *l, const struct phone_call_record *rec, unsigned long long ts_epoch_s, const char *recording);
 
 /* remove every record, or only those of one type; the number removed */
 unsigned int calllog_delete(struct calllog *l, const enum calllog_type *only);
