@@ -110,8 +110,12 @@ static int model_frame(void *ctx, const uint8_t tx[4], uint8_t rx[4])
 		return 0;
 	}
 	m->reg[ch][reg] = tx[2];
-	if (reg == REG_FSKDAT && (m->reg[ch][REG_IRQEN1] & IRQEN1_FSK_ROOM))
-		m->reg[ch][REG_IRQ1] |= IRQ1_FSK_ROOM;		/* the enabled buffer took the byte: room for the next one */
+	/* the enabled buffer takes a byte only from on-hook transmission (or while ringing); a plain forward active
+	 * on-hook line never raised the room flag on the line */
+	if (reg == REG_FSKDAT && (m->reg[ch][REG_IRQEN1] & IRQEN1_FSK_ROOM) &&
+	    ((m->reg[ch][REG_LINEFEED] & LF_STATE_MASK) == LF_CODE_FWD_OHT ||
+	     (m->reg[ch][REG_LINEFEED] & LF_STATE_MASK) == LF_CODE_RING))
+		m->reg[ch][REG_IRQ1] |= IRQ1_FSK_ROOM;		/* the buffer took the byte: room for the next one */
 	if (reg == REG_IRQ1)
 		m->reg[ch][REG_IRQ1] &= (uint8_t)~tx[2];	/* a written-back flag clears */
 	if (reg == REG_CALR3 && (tx[2] & CAL_BUSY))

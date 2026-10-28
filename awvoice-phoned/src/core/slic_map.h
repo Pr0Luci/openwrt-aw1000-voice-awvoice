@@ -183,6 +183,7 @@ enum converter_word {
 #define LF_STATE_MASK		0x0f
 #define LF_CODE_OPEN		0x0
 #define LF_CODE_FWD_ACTIVE	0x1
+#define LF_CODE_FWD_OHT		0x2			/* forward active, on-hook transmission: the state Type-1 caller-id data is sent from */
 
 /*
  * DC feed (stage 4): a preset is 24 RAM words written while the line stays open. Each preset word goes to its paired
@@ -445,9 +446,15 @@ static const struct { uint16_t ram; uint8_t off; } imped_ram_word[] = {
  * (words), then the 8-bit flag and the buffer depth (bytes). The buffer room flag (register 18, bit 0x40, cleared by
  * writing it back) reports only when it is enabled in register 22 (bit 0x40) and the buffer machinery is armed by the
  * depth pair 8 then 0 before the bytes; without either the per-byte polls time out at the first byte (measured on the
- * line, 2026-10-19). Timing
+ * line, 2026-10-19). The data itself goes out only from the on-hook transmission state (LF_CODE_FWD_OHT): the chip
+ * maker's caller-id routine requires it for Type-1 data, the datasheet names it as the state for data between ringing
+ * bursts, and a plain forward active on-hook line never raised the room flag on the line (the hardware runs of this
+ * issue). Timing
  * follows the signalling specifications: 300 alternating bits, about 180 mark bits, the message at 1200 baud with
- * start and stop bits; the message is sent in the silence at least CID_GAP_MS after the first ring burst.
+ * start and stop bits; the message is sent in the silence at least CID_GAP_MS after the first ring burst. The
+ * framing comes with the mode's high bit clear and the plain bits with it set -- measured on the line, 2026-10-29:
+ * with the bit set the message's bytes left the chip as 8-bit runs with no start or stop bit, and the handset showed
+ * a line error. The seizure and the mark are bit patterns, not characters, so they go out plain and the message framed.
  */
 #define REG_FSKDAT		58
 #define REG_FSKDEPTH		59
@@ -459,7 +466,7 @@ static const struct { uint16_t ram; uint8_t off; } imped_ram_word[] = {
 #define RAM_FSK10		839
 #define IRQ1_FSK_ROOM		0x40
 #define OMODE_FSK		0x0a
-#define OMODE_STARTSTOP		0x80
+#define OMODE_FSKRAW		0x80		/* set: the bytes leave as plain bits; clear: a start (space) and a stop (mark) bit around each */
 #define OCON_FSK		0x05
 #define FSK_O1_TALO		0x13
 #define FSK_PRESET_SIZE		28

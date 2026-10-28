@@ -113,6 +113,24 @@ static int fsk_run(struct chip *c, unsigned int ch, uint8_t value, const uint8_t
 	return err;
 }
 
+/* The data goes out from the on-hook transmission state, as the chip maker's caller-id routine requires for Type-1
+ * data (a plain forward active on-hook line never reported room for the bytes on the line). The register's upper bits
+ * belong to the chip (the ring's own phase among them), so only the state is compared while the value goes back
+ * whole: writing the state alone put a fresh ring burst on the line right after the message. */
+static int lf_set(struct chip *c, unsigned int ch, uint8_t want, FILE *log)
+{
+	uint8_t got;
+	int err = chip_reg_write(c, ch, REG_LINEFEED, want);
+
+	if (!err)
+		err = chip_reg_read(c, ch, REG_LINEFEED, &got);
+	if (!err && (got & LF_STATE_MASK) != (want & LF_STATE_MASK)) {
+		fprintf(log, "  channel %u: line feed state 0x%02x after the caller-id switch (wanted 0x%02x)\n", ch, got, want);
+		err = -EIO;
+	}
+	return err;
+}
+
 static int load_fsk(struct chip *c, const struct board *b, unsigned int ch, int standard, uint8_t *omode)
 {
 	static const uint16_t ram[6] = { RAM_FSK01, RAM_FSK10, RAM_FSKAMP0, RAM_FSKAMP1, RAM_FSKFREQ0, RAM_FSKFREQ1 };
@@ -276,10 +294,10 @@ int cid_dtmf_send(struct chip *c, const struct board *b, unsigned int ch, const 
 int cid_send(struct chip *c, const struct board *b, unsigned int ch, int standard, const uint8_t *msg, size_t len,
 	const struct cid_guard *guard, FILE *log)
 {
-	uint8_t omode, ocon, timers[4], mode, irqen = 0;
+	uint8_t omode, ocon, timers[4], mode, irqen = 0, lf, back_lf = 0;
 	unsigned int k, at_byte = 0;
 	const char *at;
-	int err, back = 0;
+	int err, back = 0, lf_back, switched = 0;
 
 	if (standard != CID_BELLCORE && standard != CID_ETSI)
 		return -EINVAL;
@@ -288,18 +306,37 @@ int cid_send(struct chip *c, const struct board *b, unsigned int ch, int standar
 		err = chip_reg_read(c, ch, REG_O1_TALO + k, &timers[k]);
 	if (!err)
 		err = chip_reg_read(c, ch, REG_IRQEN1, &irqen);
+	if (!err)
+		err = chip_reg_read(c, ch, REG_LINEFEED, &lf);
+	/* The value read goes back whole -- except a ring: the chip starts a burst whenever the line enters the ringing
+	 * state, so a phone still working the message out would be rung in the same breath as its last byte. The pause the
+	 * message was sent in is forward active, and the caller puts the ring back on at the cadence's own time. */
+	if (!err)
+		back_lf = (lf & LF_STATE_MASK) == LF_CODE_RING ? LF_CODE_FWD_ACTIVE : lf;
 	if (!err) {
 		at = "room flag enable";
 		err = put_reg(c, ch, REG_IRQEN1, (uint8_t)(irqen | IRQEN1_FSK_ROOM));
 	}
 	if (!err)
 		err = load_fsk(c, b, ch, standard, &omode);
+	if (!err) {
+		at = "on-hook transmission";
+		switched = 1;			/* the write may have landed even when its check failed */
+		err = lf_set(c, ch, LF_CODE_FWD_OHT, log);
+	}
 	if (err) {
+		if (switched)
+			(void)chip_reg_write(c, ch, REG_LINEFEED, back_lf);	/* the value as it was read, phase bits and all */
 		fprintf(log, "  channel %u: caller-id setup failed (%d)\n", ch, err);
 		return err;
 	}
+	fprintf(log, "  channel %u: line feed 0x%02x -> 0x%02x (on-hook transmission) for the caller id\n", ch,
+		lf & LF_STATE_MASK, LF_CODE_FWD_OHT);
 
-	mode = (uint8_t)((omode & ~OMODE_STARTSTOP) | OMODE_FSK);
+	/* the seizure and the mark are bit patterns, not characters: they go out as plain bits, so the mark is one
+	 * unbroken run of ones. The chip frames each byte with a start and a stop bit while this bit is clear, so the
+	 * message clears it; the line showed the opposite of what the bit's name promised (measured 2026-10-29) */
+	mode = (uint8_t)((omode | OMODE_FSKRAW) | OMODE_FSK);
 	at = "oscillator stop";
 	err = put_reg(c, ch, REG_OCON, 0);
 	if (!err) {
@@ -323,7 +360,7 @@ int cid_send(struct chip *c, const struct board *b, unsigned int ch, int standar
 	}
 	if (!err) {
 		at = "start-stop flag";					/* from here every byte carries its start and stop bit */
-		err = put_reg(c, ch, REG_OMODE, (uint8_t)(mode | OMODE_STARTSTOP));
+		err = put_reg(c, ch, REG_OMODE, (uint8_t)(mode & ~OMODE_FSKRAW));
 	}
 	if (!err) {
 		at = "message";
@@ -341,6 +378,9 @@ int cid_send(struct chip *c, const struct board *b, unsigned int ch, int standar
 		back = put_reg(c, ch, REG_OCON, ocon);
 	if (!back)
 		back = put_reg(c, ch, REG_IRQEN1, irqen);
+	lf_back = lf_set(c, ch, back_lf, log);		/* the line goes back even when a restore above failed */
+	if (!back)
+		back = lf_back;
 	if (err == -ECANCELED)
 		fprintf(log, "  channel %u: caller id stopped at %s (byte %u): the handset was lifted\n", ch, at, at_byte);
 	else if (err)

@@ -644,6 +644,64 @@ static void test_ring_trip_answers_at_once(void)
 }
 
 /*
+ * A caller id sent between the bursts leaves the line in the pause, not in a fresh burst: the chip starts ringing as
+ * soon as the line enters that state, and a phone that is still working the message out is rung in the same breath as
+ * the last byte (reported on the line 2026-10-29 as a garbled display). The line is held silent for what is left of
+ * the cadence's own pause, and the ring resumes there.
+ */
+static void test_cid_holds_the_pause(void)
+{
+	struct rig r;
+	unsigned int mark;
+
+	rig_init(&r);
+	r.ops.cid = CID_BELLCORE;		/* the data goes out after the first burst; the model shows no burst phase */
+	the_caller = "712345678";		/* the network's national significant number: the display wants the trunk 0 */
+	rig_open(&r);
+	mark = r.m.log_count;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 2500);
+	assert(status_of(&r).line == PHONE_LINE_RINGING && writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 1);
+	run_ms(&r, 600);			/* the send starts 2.6 s into the ring and ends about a second later */
+	assert(count_in(log_text(&r), "caller id sent") == 1);
+	/* the running service's log carries no number or name (phone.h): the send's own line states the length only */
+	assert(count_in(log_text(&r), "caller id sent (north american, 25 message bytes)") == 1);
+	assert(strstr(log_text(&r), "0712345678") == NULL);
+	assert(count_in(log_text(&r), "the ring rests") == 1);
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_FWD_ACTIVE) == 1);
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 1);	/* the send's end did not put the ring back on */
+	assert(status_of(&r).line == PHONE_LINE_RINGING);		/* the call still rings: the line only rests */
+	run_ms(&r, 1500);			/* still inside the natural pause */
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 1);
+	run_ms(&r, 2000);			/* the pause's end plus a little: the burst is back */
+	assert(count_in(log_text(&r), "ring started (after the caller id)") == 1);
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 2);
+	rig_close(&r);
+	the_caller = "5551";
+}
+
+/*
+ * The number the handset is given: the network reports the national significant number, and the display wants it in the
+ * national form with the trunk prefix (ITU-T E.123). A bring-up run's log shows it; the service's never does (phone.h).
+ */
+static void test_cid_display_number(void)
+{
+	struct rig r;
+
+	rig_init(&r);
+	r.ops.service_log = 0;
+	r.cfg.service_log = 0;
+	r.ops.cid = CID_BELLCORE;
+	the_caller = "712345678";
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3300);			/* the ring, the caller id and the rest of the pause */
+	assert(count_in(log_text(&r), "caller id, number '0712345678'") == 1);
+	rig_close(&r);
+	the_caller = "5551";
+}
+
+/*
  * The answering machine: an offered call left alone for the delay is answered by the line itself, with the handset down.
  * The call is nobody's at the handset (it never rings again, a lift takes it over, no tone follows the caller's hang-up),
  * and a blocked caller, a busy line or a ring test is never answered by it. The core runs only the state machine and the
@@ -2786,6 +2844,8 @@ int main(void)
 	test_late_step();
 	test_busy_line_refuses();
 	test_ring_trip_answers_at_once();
+	test_cid_holds_the_pause();
+	test_cid_display_number();
 	test_machine_answer();
 	test_machine_waiting();
 	test_modem_timeouts();

@@ -276,9 +276,6 @@ static int ring_stop(struct chip *c, unsigned int ch, struct phone *p, const cha
 /* build and send one caller-id message for the number (the date and time are the router's clock) */
 static int cid_deliver(struct chip *c, struct phone *p, unsigned int ch, const char *number, FILE *log);
 
-/* build and send one caller-id message for the number (the date and time are the router's clock) */
-static int cid_deliver(struct chip *c, struct phone *p, unsigned int ch, const char *number, FILE *log);
-
 static int ring_start(struct chip *c, unsigned int ch, struct phone *p, unsigned long long now, FILE *log)
 {
 	int err;
@@ -358,9 +355,12 @@ static int cid_deliver(struct chip *c, struct phone *p, unsigned int ch, const c
 	info.hour = tm.tm_hour;
 	info.minute = tm.tm_min;
 	/* the handset shows the national form (ITU-T E.123), as an exchange's caller id does; the records keep the international one */
-	char shown[PHONE_NUMBER_MAX + 1];
+	char net[PHONE_NUMBER_MAX + 1], shown[PHONE_NUMBER_MAX + 1];
 
-	if (number_national(number, p->cfg.region, shown, sizeof(shown)))
+	/* the modem reports a caller as the network gave it (the national significant number alone here); the international
+	 * form comes first so that the national one carries the trunk prefix. The number is bounded by cid_number's own
+	 * buffer, so neither conversion can overflow here */
+	if (number_from_network(number, p->cfg.region, net, sizeof(net)) || number_national(net, p->cfg.region, shown, sizeof(shown)))
 		snprintf(shown, sizeof(shown), "%s", number);
 	if (p->call->cid == CID_DTMF || p->call->cid == CID_DTMF_TIME) {
 		if (p->call->service_log)
@@ -375,6 +375,9 @@ static int cid_deliver(struct chip *c, struct phone *p, unsigned int ch, const c
 	len = cid_message(&info, msg, sizeof(msg));
 	if (len <= 0)
 		return len < 0 ? len : -EIO;
+	/* the running service's log carries no number (phone.h); a bring-up run's does, as the dtmf branch above */
+	if (!p->call->service_log)
+		fprintf(log, "  channel %u: caller id, number '%s'\n", ch, shown);
 	return cid_send(c, p->board, ch, p->call->cid, msg, (size_t)len, &guard, log);
 }
 
@@ -383,6 +386,33 @@ static int cid_deliver(struct chip *c, struct phone *p, unsigned int ch, const c
 static int is_congestion(int cause)
 {
 	return cause == 1 || cause == 3 || cause == 28 || cause == 34 || cause == 38 || cause == 42;
+}
+
+/*
+ * The ring after a caller id sent between the bursts. The send leaves the line in the pause, forward active (the chip
+ * starts a ring burst whenever the line enters the ringing state, so the send never puts a ringing line back). The
+ * line is held silent for what is left of the natural pause (the burst's end plus the cadence's own off time) and the
+ * cadence resumes there, as the exchange's would: the phone's decoder works the message out in silence.
+ */
+static int ring_hold(struct chip *c, unsigned int ch, struct phone *p, unsigned long long now, FILE *log)
+{
+	unsigned long long pause = (p->burst_seen && p->gap_since_ms ? p->gap_since_ms : p->ring_since_ms + RING_ON_MS) + RING_OFF_MS;
+
+	p->burst_seen = 0;
+	p->gap_since_ms = 0;
+	if (now >= pause) {
+		/* the send outlasted the pause: the next burst is due now */
+		p->ring_since_ms = p->ring_log_ms = now;
+		p->last_lf = 0xff;
+		if (ring_set(c, ch, 1, log))
+			return -EIO;
+		fprintf(log, "  channel %u: ring started (the pause was over when the caller id ended)\n", ch);
+	} else {
+		p->cid_wait_ms = pause;
+		fprintf(log, "  channel %u: the ring rests %llu ms more (the caller id ended inside the pause)\n", ch,
+			elapsed_ms(pause, now));
+	}
+	return 0;
 }
 
 /* one ring supervision step (every RING_POLL_MS): the supply log, the caller-id timing and the ring test's time. The
@@ -400,7 +430,9 @@ static int ring_tick(struct chip *c, unsigned int ch, struct phone *p, unsigned 
 			return -EIO;
 		p->ring_since_ms = p->ring_log_ms = now;
 		p->last_lf = 0xff;
-		fprintf(log, "  channel %u: ring started (the caller id went out first)\n", ch);
+		p->burst_seen = 0;
+		p->gap_since_ms = 0;
+		fprintf(log, "  channel %u: ring started (after the caller id)\n", ch);
 	}
 
 	/* the supply readings: every RING_LOG_MS in a bring-up run, in a service only for the first seconds of each ring
@@ -434,8 +466,10 @@ static int ring_tick(struct chip *c, unsigned int ch, struct phone *p, unsigned 
 			fprintf(log, "  channel %u: caller id starts %llu ms after the ring started, after %llu ms of silence%s\n", ch,
 				elapsed_ms(now, p->ring_since_ms), p->gap_since_ms ? elapsed_ms(now, p->gap_since_ms) : 0ull,
 				p->burst_seen ? "" : " (no burst seen, the cadence's own timing)");
-			/* a failed send is logged by cid_send; the ring goes on */
+			/* a failed send is logged by cid_send; the ring goes on either way */
 			(void)cid_deliver(c, p, ch, p->cid_number, log);
+			if (p->ringing && ring_hold(c, ch, p, now, log))
+				return -EIO;
 		}
 	}
 	if (p->ring_end_ms && now >= p->ring_end_ms)
