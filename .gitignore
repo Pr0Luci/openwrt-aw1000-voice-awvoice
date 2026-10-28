@@ -5,6 +5,9 @@ build/
 *.a
 .DS_Store
 
+# the release build's output directory
+dist/
+
 # the LuCI QA sweep tool (a local copy; never committed)
 tools/luci-qa.sh
 tools/luci-qa.js

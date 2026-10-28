@@ -1,0 +1,4 @@
+# the luci commit the CleanWRT image pins (its feeds.conf.default). The app is
+# built by the luci.mk of the luci it installs into, so this file overrides the
+# SDK's own luci pin and the build asserts the checkout.
+luci 350fc919675bb62e415927afff65697fcb8f775d
