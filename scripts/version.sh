@@ -61,6 +61,7 @@ set)
 		mv "$part" "$TOP/$f"
 	done
 	printf '%s\n' "$new" > "$TOP/VERSION"
+	VER=$new		# the check compares against the version just written, not the one read at the start
 	check
 	;;
 *)
