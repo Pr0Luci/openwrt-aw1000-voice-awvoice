@@ -35,6 +35,8 @@ static int model_frame(void *ctx, const uint8_t tx[4], uint8_t rx[4])
 	if (read) {
 		if (reg == REG_ID)
 			rx[2] = m->id;
+		else if (reg == REG_MSTRSTAT)
+			rx[2] = m->mstrstat;
 		else if (reg == REG_LINEFEED && m->lf_read_value >= 0)
 			rx[2] = (uint8_t)m->lf_read_value;
 		else if (reg == REG_LCRRTP) {
@@ -176,6 +178,7 @@ void init_model(struct model *m)
 {
 	memset(m, 0, sizeof(*m));
 	m->id = CHIP_ID_VALUE;
+	m->mstrstat = MSTRSTAT_RUNNING;
 	m->ram_sticks = 1;
 	m->lf_read_value = -1;
 }

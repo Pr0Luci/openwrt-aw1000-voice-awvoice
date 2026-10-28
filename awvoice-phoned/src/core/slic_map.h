@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #define CHIP_ID_VALUE		0xc3
+#define MSTRSTAT_RUNNING	0x1f	/* the chip's ready state: its own firmware is up (this board carries that firmware in the line chip's flash) */
 
 enum slic_reg {
 	REG_ID = 0,
