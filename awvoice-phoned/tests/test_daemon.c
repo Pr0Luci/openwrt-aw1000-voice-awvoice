@@ -2758,7 +2758,6 @@ static void test_ringback_auto(void)
 static void test_dead_chip_fails_loud(void)
 {
 	struct rig r;
-	char *log;
 
 	/* a unit whose line chip's own firmware never started (an erased chip flash): the stage
 	 * refuses and names the cause loudly, instead of leaving a silent dead line */
@@ -2766,11 +2765,10 @@ static void test_dead_chip_fails_loud(void)
 	r.m.mstrstat = 0x00;
 	assert(stage0_identify(&r.c, r.log) == -ENODEV);
 	fflush(r.log);
-	log = r.lbuf;
-	assert(strstr(log, "master status 0x00"));
-	assert(strstr(log, "its own firmware did not start"));
+	assert(strstr(r.lbuf, "master status 0x00"));
+	assert(strstr(r.lbuf, "its own firmware did not start"));
 	fclose(r.log);
-	free(log);
+	free(r.lbuf);				/* the close moves the buffer: free the one it leaves */
 }
 
 int main(void)
