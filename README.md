@@ -20,6 +20,8 @@ No SIP, no Asterisk, no second number — the cellular network is the exchange a
 - Call recording (off by default — a recording may need an announcement where you live; turn it on in Settings): answered calls land on the router as WAV files, stereo — the caller and the handset on separate channels — at 16 kHz when HD voice is on. The call's own card in the log plays, saves or deletes its recording.
 - The recordings never carry a phone number — a file's name is the call's time and id — and a size budget (50 MB by default) removes the oldest when the storage passes it.
 - Emergency numbers always ring through: nothing on the router blocks or drops them.
+
+**A note on safety and emergencies:** the RJ11 contacts sit at about 46 V, and higher while the phone rings. This is not certified telephone equipment — do not rely on it for emergency calls, and check the rules that apply to you before connecting anything to the telephone network.
 - HD voice: a 16 kHz wideband path from the handset to the network, end to end (off by default; turn it on in Settings).
 - The phone LED shows the line: solid while ready, a fast blink while a call rings, a slow blink while off hook — each rate is settable.
 
@@ -41,6 +43,8 @@ No SIP, no Asterisk, no second number — the cellular network is the exchange a
 ## The board file
 
 The line chip needs this board's own settings (line voltages, ringing, tones, impedances, the init sequence). A ready board file ships with the `awvoice-phoned` package and the first service start installs it at `/etc/awvoice/board.bin` — a file already there (yours, kept across upgrades) is never overwritten. If you prefer to derive your own from your router's original firmware, the same file format is produced by `tools/provision/awvoice-board-extract.py` with the section map in `tools/provision/aw1000.map`.
+
+Why the board file ships here: its contents are the line chip's operating parameters — voltages, ringing and audio presets, impedances — functional values the hardware requires, not the chip maker's executable code. The DSP patch never ships and never runs from this port (see the note on the chip's firmware above), the values were read from the board's own stock firmware, the tool and the section map to derive them from your own firmware ship here, and the same operating values are already public in source form in other open-source projects.
 
 Note on the chip's firmware: the chip runs on the firmware built into it. This port uses **no DSP patch file** — none is needed, and none ships. The port never uploads or redistributes a proprietary binary: the line chip's ready state is checked at every service start, and if a unit's chip did not come up the service stops with that cause in the log instead of a silent dead line.
 
