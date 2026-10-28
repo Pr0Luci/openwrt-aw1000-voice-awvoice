@@ -5,8 +5,11 @@
 
 usage: python3 -I tools/provision/awvoice-board-extract.py --elf <stock module> --map <map file> --out <board file>
 
-The board values (power-supply, line-feed, tone and audio presets of the board) are vendor-provided data and are never
-kept in this repository: they are read from the user's own stock firmware on the user's own machine. The map file lists
+The board values (power-supply, line-feed, tone and audio presets of the board) are the line chip's
+operating parameters - functional configuration constants, not executable code: the chip maker's DSP
+patch never ships, and the daemon has no use for it. This tool builds a board file from the user's own
+stock firmware on the user's own machine; a ready board file for this router also ships in this
+repository (see the README for what ships and why). The map file lists
 which objects of the stock module go into which section; the map for this router model ships as tools/provision/aw1000.map,
 and a map for another board names that board's own objects and stays with that board's build.
 
