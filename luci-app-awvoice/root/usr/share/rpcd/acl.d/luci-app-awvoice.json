@@ -24,6 +24,8 @@
 					"calls",
 					"forwarding_get",
 					"health",
+					"message_get",
+					"messages",
 					"recording_get",
 					"recordings",
 					"status"
@@ -40,6 +42,7 @@
 					"hangup",
 					"line_test",
 					"loopback_test",
+					"message_delete",
 					"recording_delete",
 					"reload",
 					"ring_test"

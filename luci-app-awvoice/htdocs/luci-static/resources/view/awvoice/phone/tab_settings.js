@@ -5,9 +5,11 @@
 'require view.awvoice.phone.editors as editors';
 
 /*
- * tab_settings.js - Phone settings tab: line, tones, audio, features, recording, speed dial, indicator and advanced
- * options. Edits are held in the form and written with "Save and apply"; "Reset" discards them. Fields whose daemon
- * support is a later milestone are shown disabled with a "Not available yet" tag (api.settingsLive says which are live).
+ * tab_settings.js - Phone settings tab: line, tones, audio, features, recording, answering machine, speed dial,
+ * indicator and advanced options. Edits are held in the form and written with "Save and apply"; "Reset" discards
+ * them. The machine card shows what the daemon actually loaded, so a refused greeting is not a silent failure.
+ * Fields whose daemon support is a later milestone are shown disabled with a "Not available yet" tag
+ * (api.settingsLive says which are live).
  */
 
 var NUMBER_RE = editors.NUMBER_RE;
@@ -58,6 +60,16 @@ var recPath = u.text('', '/etc/awvoice/recordings', 'av-mono wide');
 var recMax = num('recmax', 1, 4095, _('Recording budget in megabytes'));
 var recUsage = E('span', { 'class': 'av-mono' }, '');
 
+/* the answering machine: its greeting, the wait before it answers and its message storage */
+var machOn = u.checkbox(false, _('Answer the phone for me'), function() { machineNote(); });
+var machGreeting = u.text('', '/etc/awvoice/greeting.wav', 'av-mono wide');
+var machDelay = num('mdelay', 0, 60, _('Answering machine delay in seconds'));
+var machPath = u.text('', '/etc/awvoice/messages', 'av-mono wide');
+var machMax = num('mmax', 1, 4095, _('Message budget in megabytes'));
+var machSecs = num('msecs', 10, 600, _('Longest message in seconds'));
+var msgUsage = E('span', { 'class': 'av-mono' }, '');
+var machNote = E('div', { 'class': 'av-note' });
+
 	/* the FSK variants carry the timing choice; DTMF has its own placement (it goes out while the phone rings) */
 	function fskPicked() {
 		cidWhen.disabled = cid.value !== 'bellcore' && cid.value !== 'etsi';
@@ -77,6 +89,32 @@ var recUsage = E('span', { 'class': 'av-mono' }, '');
 			if (REFRESH_STEPS.indexOf(sec) < 0)
 				refresh.appendChild(E('option', { 'value': String(sec) }, _('%d seconds').format(sec)));
 			refresh.value = String(sec);
+		}
+
+		/* whether the greeting the daemon holds matches the switch, and whether a message could be kept at all: the
+		 * daemon answers only when both hold, and the health reply says what it found */
+		function machineNote() {
+			var g = h && h.machine, st = storeState('messages');
+			var note;
+
+			if (!machOn.get()) {
+				machNote.textContent = _('Off: an unanswered call keeps ringing until the caller gives up.');
+				return;
+			}
+			if (g && g.greetingLoaded === false)
+				note = _('The greeting could not be loaded, so the machine will not answer. Check that the file exists and is a 16-bit PCM WAV at 8 or 16 kHz.');
+			else if (g && g.greetingLoaded)
+				note = _('The greeting is %s long.').format(u.fmtDuration(Math.round(g.greetingMs / 1000)));
+			else
+				note = _('The greeting\'s state is not known yet.');
+			if (st && st.ready === false)
+				note += ' ' + _('The machine will not answer until the message folder can be used: %s.').format(
+					st.error || _('no reason given'));
+			else if (st && st.ready === true && st.freeMb != null && st.freeMb < 1)
+				note += ' ' + _('The machine will not answer until the message folder has room for a file.');
+			else if (g && g.greetingLoaded)
+				note += ' ' + _('It answers after %s seconds.').format(String(g.delaySec));
+			machNote.textContent = note;
 		}
 
 		function fill() {
@@ -107,12 +145,22 @@ var recUsage = E('span', { 'class': 'av-mono' }, '');
 				ringRate.value = p.indicator.ringRateMs; offhookRate.value = p.indicator.offhookRateMs;
 				fill();
 				usb.value = p.modem.usbInterface;
+				machOn.set(p.machine.enabled);
+				machGreeting.value = p.machine.greeting;
+				machDelay.value = p.machine.delaySec;
+				machPath.value = p.machine.path;
+				machMax.value = p.machine.maxMb;
+				machSecs.value = p.machine.maxSec;
 				setRefresh(p.page.refreshSec);
 				err.textContent = '';
 				return ctx.api.getHealth();
 			}).then(function(health) {
 				h = health;
 				fill();
+				machineNote();
+				/* the usage lines carry the folders' state, so they are drawn again once it is known */
+				recRefreshUsage();
+				msgRefreshUsage();
 			}, function(e) { err.textContent = e.message; });
 		}
 
@@ -124,13 +172,51 @@ var recUsage = E('span', { 'class': 'av-mono' }, '');
 			}, function(e) { err.textContent = err.textContent || e.message; });
 		}
 
+		/* one refusal must not hide the files that did go: every delete settles, then the count says how it went;
+		 * the usage line is read again and the Calls tab is told, so no card keeps pointing at a gone file */
+		function delAll(list, del, noun, done, usage, evt) {
+			return Promise.all(list.map(function(f) {
+				return del(f.name).then(function() { return null; }, function(e) { return e; });
+			})).then(function(errs) {
+				var bad = errs.filter(function(e) { return e; });
+
+				ctx.toast(bad.length ? _('%d of %d %s could not be deleted: %s').format(bad.length, list.length, noun, bad[0].message) : done);
+				ctx.emit(evt);
+				return usage();
+			});
+		}
+
+		/* the folder as the daemon reads it: no trailing slashes, and never the root (the daemon refuses both the
+		 * root and a folder that is a file, and says why on the Health tab) */
+		function dirPath(v) {
+			v = String(v).trim().replace(/\/+$/, '');
+			return /^\/./.test(v) ? v : null;
+		}
+
+		/* the folders' state from the health reply: a folder that cannot take a file is said here, before a call
+		 * is lost to a path that only fails at write time */
+		function storeState(which) {
+			return h && h.storage ? h.storage[which] : null;
+		}
+
+		function storeTail(which) {
+			var st = storeState(which);
+
+			if (st && st.ready === false)
+				return ' ' + _('The folder cannot be used: %s.').format(st.error || _('no reason given'));
+			if (st && st.freeMb != null)
+				return ' ' + (st.freeMb < 1 ? _('Nearly full: %s MB free.').format(st.freeMb) : _('%s MB free.').format(st.freeMb));
+			return '';
+		}
+
 		function recRefreshUsage() {
 			return ctx.api.listRecordings().then(function(list) {
 				var bytes = list.reduce(function(a, r) { return a + r.bytes; }, 0);
-				recUsage.textContent = list.length ?
-					_('%d recordings, %s MB on the storage').format(list.length, (bytes / 1048576).toFixed(1)) : _('No recordings on the storage.');
+				recUsage.textContent = (list.length ?
+					_('%d recordings, %s MB on the storage').format(list.length, (bytes / 1048576).toFixed(1)) :
+					_('No recordings on the storage.')) + storeTail('recordings');
 				return list;
-			});
+			}, function(e) { recUsage.textContent = e.message; return []; });
 		}
 
 		function recDeleteAll() {
@@ -139,12 +225,27 @@ var recUsage = E('span', { 'class': 'av-mono' }, '');
 					return;
 				editors.confirm(ctx, _('Delete all recordings'),
 					_('Delete all %d recordings? This cannot be undone.').format(list.length), _('Delete all'),
-					function() {
-						return Promise.all(list.map(function(r) { return ctx.api.deleteRecording(r.name); })).then(function() {
-							ctx.toast(_('Recordings deleted'));
-							recRefreshUsage();
-						}, function(e) { ctx.toast(e.message); });
-					});
+					function() { return delAll(list, ctx.api.deleteRecording, _('recordings'), _('Recordings deleted'), recRefreshUsage, 'recordings'); });
+			});
+		}
+
+		function msgRefreshUsage() {
+			return ctx.api.listMessages().then(function(list) {
+				var bytes = list.reduce(function(a, m) { return a + m.bytes; }, 0);
+				msgUsage.textContent = (list.length ?
+					_('%d messages, %s MB on the storage').format(list.length, (bytes / 1048576).toFixed(1)) :
+					_('No messages on the storage.')) + storeTail('messages');
+				return list;
+			}, function(e) { msgUsage.textContent = e.message; return []; });
+		}
+
+		function msgDeleteAll() {
+			return msgRefreshUsage().then(function(list) {
+				if (!list.length)
+					return;
+				editors.confirm(ctx, _('Delete all messages'),
+					_('Delete all %d messages? This cannot be undone.').format(list.length), _('Delete all'),
+					function() { return delAll(list, ctx.api.deleteMessage, _('messages'), _('Messages deleted'), msgRefreshUsage, 'messages'); });
 			});
 		}
 
@@ -172,9 +273,18 @@ var recUsage = E('span', { 'class': 'av-mono' }, '');
 			if (!(rr >= 100 && rr <= 3000)) { err.textContent = _('The indicator call-blink rate must be 100 to 3000 ms'); return; }
 			if (!(orate >= 200 && orate <= 10000)) { err.textContent = _('The indicator off-hook blink rate must be 200 to 10000 ms'); return; }
 
-			var rp = recPath.value.trim(), rm = parseInt(recMax.value, 10);
-			if (!/^\//.test(rp)) { err.textContent = _('The recording folder must start with a slash'); return; }
+			var rp = dirPath(recPath.value), rm = parseInt(recMax.value, 10);
+			if (!rp) { err.textContent = _('The recording folder must be an absolute path that is not the root'); return; }
 			if (!(rm >= 1 && rm <= 4095)) { err.textContent = _('The recording budget must be 1 to 4095 MB'); return; }
+
+			var mg = machGreeting.value.trim(), mp = dirPath(machPath.value);
+			var md = parseInt(machDelay.value, 10), mmb = parseInt(machMax.value, 10), ms = parseInt(machSecs.value, 10);
+			if (!/^\//.test(mg) || mg.length >= 128) { err.textContent = _('The greeting file must be an absolute path shorter than 128 characters'); return; }
+			if (!mp || mp.length >= 128) { err.textContent = _('The message folder must be an absolute path shorter than 128 characters and not the root'); return; }
+			if (mp === rp) { err.textContent = _('The messages cannot be kept in the recording folder. Choose another folder.'); return; }
+			if (!(md >= 0 && md <= 60)) { err.textContent = _('The answering machine delay must be 0 to 60 seconds'); return; }
+			if (!(mmb >= 1 && mmb <= 4095)) { err.textContent = _('The message budget must be 1 to 4095 MB'); return; }
+			if (!(ms >= 10 && ms <= 600)) { err.textContent = _('The longest message must be 10 to 600 seconds'); return; }
 
 			ctx.api.savePhoneSettings({
 				line: { cid: cid.value, cidWhen: when(), myNumber: my, dialPauseSec: dp },
@@ -185,7 +295,8 @@ var recUsage = E('span', { 'class': 'av-mono' }, '');
 				features: { clir: loaded.features.clir, conference: conf.get(), callWaiting: wait.get(), hotline: { number: hn, delaySec: parseInt(hotDelay.value, 10) || loaded.features.hotline.delaySec } },
 				indicator: { led: led.value, ringRateMs: rr, offhookRateMs: orate },
 				modem: { usbInterface: ui },
-				page: { refreshSec: parseInt(refresh.value, 10) || 1 }
+				page: { refreshSec: parseInt(refresh.value, 10) || 1 },
+				machine: { enabled: machOn.get(), greeting: mg, delaySec: md, path: mp, maxMb: mmb, maxSec: ms }
 			}).then(function() {
 				return ctx.api.saveRecordingSettings({ enabled: recEnabled.get(), path: rp, maxMb: rm });
 			}).then(function() {
@@ -253,7 +364,7 @@ var recUsage = E('span', { 'class': 'av-mono' }, '');
 			]),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', _('Recording')),
-				E('div', { 'class': 'av-note' }, _('Calls are recorded onto the router\'s own storage while they happen; the recordings are listed on the Calls tab. The oldest give way when the budget is full.')),
+				E('div', { 'class': 'av-note' }, _('Calls are recorded onto the router\'s own storage while they happen; the recordings are listed on the Calls tab. The oldest give way when the budget is full. A call the answering machine answered is kept as its message, not as a recording; the part of the conversation after you pick the handset up is not recorded.')),
 				u.field(_('Record calls'), _('Off by default'), E('div', { 'class': 'av-inline' }, [ recEnabled.node ])),
 				u.field(_('Recording folder'), _('Where the recordings are kept. The folder must start with a slash.'), recPath),
 				u.field(_('Storage budget'), _('The recordings may fill this many megabytes before the oldest give way (1 to 4095)'),
@@ -261,6 +372,25 @@ var recUsage = E('span', { 'class': 'av-mono' }, '');
 				u.field(_('Stored recordings'), _('Everything recorded so far lives in the recording folder.'),
 					E('div', { 'class': 'av-inline' }, [ recUsage,
 						u.button(_('Delete all'), 'trash', 'cbi-button-remove important', function() { recDeleteAll(); }) ]))
+			]),
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', _('Answering machine')),
+				E('div', { 'class': 'av-note' }, _('An incoming call the handset does not take is answered by the machine: the caller hears the greeting and leaves a message, which appears on the Calls tab. Only the cellular line is answered. Picking up the handset hands the call over: the message ends at the lift and keeps what the caller said up to it — the classic answering-machine behaviour.')),
+				u.field(_('Answer the phone'), _('Off by default. The greeting is played toward the caller.'),
+					E('div', { 'class': 'av-inline' }, [ machOn.node ])),
+				u.field(_('Greeting file'), _('An absolute path on the router to a 16-bit PCM WAV at 8 or 16 kHz, mono or stereo. A file that cannot be read switches the machine off.'),
+					machGreeting),
+				u.field(_('Answer after'), _('Seconds to ring before the machine answers (0 to 60); zero answers at once'),
+					E('div', { 'class': 'av-inline' }, [ machDelay, E('span', { 'class': 'av-mut' }, 's') ])),
+				u.field(_('Message folder'), _('Where the messages are kept. The folder must start with a slash.'), machPath),
+				u.field(_('Storage budget'), _('The messages may fill this many megabytes before the oldest give way (1 to 4095)'),
+					E('div', { 'class': 'av-inline' }, [ machMax, E('span', { 'class': 'av-mut' }, 'MB') ])),
+				u.field(_('Longest message'), _('The machine ends the call after this many seconds (10 to 600)'),
+					E('div', { 'class': 'av-inline' }, [ machSecs, E('span', { 'class': 'av-mut' }, 's') ])),
+				u.field(_('Stored messages'), _('Everything the machine kept lives in the message folder. A message whose call leaves the log can still be played and deleted on the Calls tab.'),
+					E('div', { 'class': 'av-inline' }, [ msgUsage,
+						u.button(_('Delete all'), 'trash', 'cbi-button-remove important', function() { msgDeleteAll(); }) ])),
+				machNote
 			]),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', [ _('Speed dial'),
@@ -289,13 +419,14 @@ var recUsage = E('span', { 'class': 'av-mono' }, '');
 			err,
 			E('div', { 'class': 'av-acts' }, [
 				u.button(_('Save and apply'), '', 'cbi-button-save important', save),
-				u.button(_('Reset'), '', 'cbi-button-reset', function() { load(); loadRec(); recRefreshUsage(); })
+				u.button(_('Reset'), '', 'cbi-button-reset', function() { load(); loadRec(); })
 			])
 		]);
 
 		load();
 		loadRec();
-	recRefreshUsage();
+		recRefreshUsage();
+		msgRefreshUsage();
 		drawSpeed();
 		return root;
 	}

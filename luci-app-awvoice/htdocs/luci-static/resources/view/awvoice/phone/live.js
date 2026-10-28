@@ -43,9 +43,11 @@ var bus = {
 var CONF = 'awvoice', SECT = 'main';
 var LOG_LINES = 40;
 var RING_TEST_SEC = 5;
+var MACHINE_GREETING_DEF = '/etc/awvoice/greeting.wav', MACHINE_PATH_DEF = '/etc/awvoice/messages';
 
 var STATES = { idle: 1, offhook: 1, ring: 1, call: 1, noservice: 1, down: 1 };
 var PHASES = { ringing: 1, dialing: 1, alerting: 1, active: 1 };
+var MACHINES = { none: 1, answering: 1, answered: 1 };
 
 /* the backends that exist today; everything else rejects with "Not available yet" */
 var AVAILABLE = {
@@ -86,7 +88,7 @@ function str(v) { return typeof v === 'string' ? v : ''; }
 
 function downStatus() {
 	return {
-		state: 'down', line: 'down', hook: null, call: null,
+		state: 'down', line: 'down', hook: null, machine: null, call: null,
 		voiceNetwork: { registered: null, ims: null },
 		signal: { rsrpDbm: null, network: null },
 		service: { running: false }, myNumber: ''
@@ -101,6 +103,8 @@ function normStatus(r) {
 		state: STATES[r.state] ? r.state : 'down',
 		line: str(r.line),
 		hook: r.hook === 'on' || r.hook === 'off' ? r.hook : null,
+		/* the answering machine's part in the call; null when the daemon did not say (an old one, or no line) */
+		machine: MACHINES[r.machine] ? r.machine : null,
 		call: c ? {
 			id: num(c.id), direction: c.direction === 'OUT' ? 'OUT' : 'IN', number: str(c.number),
 			phase: PHASES[c.phase] ? c.phase : 'dialing', elapsedSec: Math.max(0, num(c.elapsedSec) || 0)
@@ -114,7 +118,8 @@ function normStatus(r) {
 
 function normHealth(r) {
 	r = r || {};
-	var a = r.atPort || {}, l = r.line || {}, m = r.modem || {}, s = r.system || {}, b = s.bridge || {}, k = r.counters || {}, i = r.indicator || {};
+	var a = r.atPort || {}, l = r.line || {}, m = r.modem || {}, s = r.system || {}, b = s.bridge || {}, k = r.counters || {}, i = r.indicator || {}, mc = r.machine || {};
+	var st = r.storage || {}, sr = st.recordings || {}, sm = st.messages || {};
 	return {
 		atPort: { port: str(a.port), usbInterface: num(a.usbInterface), responding: tri(a.responding), lastReplyAgoSec: num(a.lastReplyAgoSec) },
 		line: { channel: num(l.channel), hook: l.hook === 'on' || l.hook === 'off' ? l.hook : null, state: str(l.state),
@@ -127,6 +132,13 @@ function normHealth(r) {
 			leds: Array.isArray(i.leds) ? i.leds.map(str).filter(function(x) { return x; }) : [] },
 		counters: { modemTimeouts: num(k.modemTimeouts), hookGapsOver20ms: num(k.hookGapsOver20ms),
 			hookGapMaxMs: num(k.hookGapMaxMs), faults: num(k.faults) },
+		machine: { greetingLoaded: tri(mc.greetingLoaded), greetingMs: Math.max(0, num(mc.greetingMs) || 0),
+			delaySec: Math.max(0, num(mc.delaySec) || 0) },
+		/* the folders as the daemon last checked them (start-up, a reload, a call's start) */
+		storage: {
+			recordings: { path: str(sr.path), ready: tri(sr.ready), freeMb: num(sr.freeMb), error: str(sr.error) || null },
+			messages: { path: str(sm.path), ready: tri(sm.ready), freeMb: num(sm.freeMb), error: str(sm.error) || null }
+		},
 		log: { tail: [] }
 	};
 }
@@ -189,7 +201,15 @@ function readSettings() {
 		},
 		indicator: { led: optText('led', ''), ringRateMs: optInt('ring_rate_ms', 100, 3000, 300), offhookRateMs: optInt('offhook_rate_ms', 200, 10000, 1000) },
 		modem: { usbInterface: optInt('at_interface', 0, 9, 2) },
-		page: { refreshSec: optInt('page_refresh_s', 1, 30, 1) }
+		page: { refreshSec: optInt('page_refresh_s', 1, 30, 1) },
+		machine: {
+			enabled: optText('machine_enabled', '0') === '1',
+			greeting: optText('machine_greeting', MACHINE_GREETING_DEF),
+			delaySec: optInt('machine_delay', 0, 60, 10),
+			path: optText('machine_path', MACHINE_PATH_DEF),
+			maxMb: optInt('machine_max_mb', 1, 4095, 50),
+			maxSec: optInt('machine_max_s', 10, 600, 120)
+		}
 	};
 }
 
@@ -378,6 +398,20 @@ function validate(p) {
 		if (!(p.indicator.offhookRateMs >= 200 && p.indicator.offhookRateMs <= 10000))
 			return _('The indicator off-hook blink rate must be 200 to 10000 ms');
 	}
+	if (p.machine != null) {
+		if (typeof p.machine.greeting !== 'string' || p.machine.greeting.charAt(0) !== '/' || p.machine.greeting.length >= 128)
+			return _('The greeting file must be an absolute path shorter than 128 characters');
+		if (typeof p.machine.path !== 'string' || p.machine.path.charAt(0) !== '/' || /^\/+$/.test(p.machine.path) || p.machine.path.length >= 128)
+			return _('The message folder must be an absolute path shorter than 128 characters and not the root');
+		if (!(p.machine.delaySec >= 0 && p.machine.delaySec <= 60))
+			return _('The answering machine delay must be 0 to 60 seconds');
+		if (!(p.machine.maxMb >= 1 && p.machine.maxMb <= 4095))
+			return _('The message budget must be 1 to 4095 MB');
+		if (!(p.machine.maxSec >= 10 && p.machine.maxSec <= 600))
+			return _('The longest message must be 10 to 600 seconds');
+		if (typeof p.machine.enabled !== 'boolean')
+			return _('The answering machine setting is not valid');
+	}
 	return null;
 }
 
@@ -468,6 +502,15 @@ return baseclass.extend({
 			if (p.line.cidWhen != null)
 				put('cid_when', p.line.cidWhen);
 
+			if (p.machine != null) {
+				put('machine_enabled', p.machine.enabled ? '1' : '0');
+				put('machine_greeting', p.machine.greeting);
+				put('machine_delay', p.machine.delaySec);
+				put('machine_path', p.machine.path);
+				put('machine_max_mb', p.machine.maxMb);
+				put('machine_max_s', p.machine.maxSec);
+			}
+
 			return uci.save();
 		}).then(function() {
 			return bus.commit(CONF);
@@ -524,7 +567,7 @@ return baseclass.extend({
 				return {
 					id: num(c.id), type: c.type === 'OUT' || c.type === 'MISS' ? c.type : 'IN', number: str(c.number), name: str(c.name),
 					ts: num(c.ts) || 0, durationSec: Math.max(0, num(c.durationSec) || 0), recording: str(c.recording),
-					result: str(c.result), cause: num(c.cause) || 0
+					message: str(c.message), result: str(c.result), cause: num(c.cause) || 0
 				};
 			});
 		}, function(e) { throw fail(e); });

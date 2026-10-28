@@ -125,6 +125,29 @@ static void exchange_samples(struct awfxs *z, const struct rx_frame *in)
 		t.line2 = wide && map->mode == AWFXS_BRIDGE_CROSS ? cut(in->word, map->line_rx + 128) : 0;
 		tap_ring_push(&z->tap.ring, &t);
 	}
+	/* the playback ring: what the writer sends replaces what the mode pasted for this frame. An empty ring is
+	 * silence (0), not the idle word and never the previous frame: the caller must hear the gap, and the count
+	 * says it happened. The receive side above is untouched, so the capture tap still records what arrives. */
+	if (z->play.on) {
+		struct awfxs_play_frame f;
+		u16 modem = 0, line = 0, modem2 = 0, line2 = 0;
+
+		if (play_ring_pop(&z->play.ring, &f, 1)) {
+			modem = f.modem;
+			line = f.line;
+			modem2 = f.modem2;
+			line2 = f.line2;
+		} else {
+			z->play.underruns++;
+		}
+		paste(reply, map->modem_tx, modem);
+		paste(reply, map->line_tx, line);
+		if (map->flags & AWFXS_BRIDGE_WIDEBAND) {
+			paste(reply, map->modem_tx + 128, modem2);
+			paste(reply, map->line_tx + 128, line2);
+		}
+		z->play.frames++;
+	}
 	queue_words(z, reply, z->bridge_slots);
 	st->frames++;
 }
@@ -193,6 +216,7 @@ void awfxs_bridge_stop(struct awfxs *z)
 	z->bridge_task = NULL;
 	z->bridge_stats.running = 0;
 	awfxs_tap_disarm(z);
+	awfxs_play_disarm(z);
 }
 
 /* every bridge stop or restart invalidates the ring: a reader sees the generation change and arms again */
@@ -220,6 +244,57 @@ void awfxs_tap_fill_read(struct awfxs *z, struct awfxs_tap_read *r, struct awfxs
 	r->dropped = z->tap.ring.drops;
 	r->wideband = z->bridge_task && (z->bridge.flags & AWFXS_BRIDGE_WIDEBAND) ? 1 : 0;
 	r->generation = z->tap.generation;
+}
+
+/* every bridge stop or restart invalidates the playback too: the writer sees the generation change and re-arms */
+void awfxs_play_disarm(struct awfxs *z)
+{
+	z->play.on = false;
+	z->play.generation++;
+	play_ring_reset(&z->play.ring, z->play.slot, AWFXS_PLAY_FRAMES);
+}
+
+int awfxs_play_set(struct awfxs *z, u32 on)
+{
+	if (on && !z->bridge_task)
+		return -ENODEV;		/* arming needs a running bridge: the bridge is the consumer */
+	if (on) {
+		play_ring_reset(&z->play.ring, z->play.slot, AWFXS_PLAY_FRAMES);
+		z->play.frames = 0;
+		z->play.underruns = 0;
+	}
+	z->play.on = on != 0;
+	return 0;
+}
+
+/* store as many of the offered frames as fit; the ring's full count says the rest were refused */
+int awfxs_play_fill_write(struct awfxs *z, struct awfxs_play_write *w, const struct awfxs_play_frame *frames)
+{
+	u32 room, take, n;
+
+	w->written = 0;
+	w->dropped = z->play.ring.drops;
+	w->generation = z->play.generation;
+	if (!z->play.on)
+		return -ENODEV;		/* the bridge stopped under the writer: loud, so it re-arms with the next call */
+	room = AWFXS_PLAY_FRAMES - play_ring_stored(&z->play.ring);
+	take = min(w->frames, room);
+	for (n = 0; n < take; n++)
+		(void)play_ring_push(&z->play.ring, &frames[n]);	/* take <= room, so none is refused here */
+	z->play.ring.drops += w->frames - take;
+	w->written = take;
+	w->dropped = z->play.ring.drops;
+	return 0;
+}
+
+void awfxs_play_fill_status(struct awfxs *z, struct awfxs_play_status *s)
+{
+	s->armed = z->play.on ? 1 : 0;
+	s->stored = z->play.on ? play_ring_stored(&z->play.ring) : 0;
+	s->dropped = z->play.ring.drops;
+	s->underruns = z->play.underruns;
+	s->frames = z->play.frames;
+	s->generation = z->play.generation;
 }
 
 /* how many slots the four positions need (and the second samples when wideband), and whether the PCM block is set up for them */
@@ -289,6 +364,7 @@ int awfxs_bridge_set(struct awfxs *z, const struct awfxs_bridge *b)
 	z->bridge_stats.slots = slots;
 	z->bridge_stats.running = 1;
 	awfxs_tap_disarm(z);	/* a new bridge is a new audio layout: readers re-arm and re-check wideband */
+	awfxs_play_disarm(z);	/* and the playback ring: what was queued for the old layout is void */
 	z->bridge_task = kthread_run(bridge_loop, z, "awvoice-fxs-bridge");
 	if (IS_ERR(z->bridge_task)) {
 		err = PTR_ERR(z->bridge_task);

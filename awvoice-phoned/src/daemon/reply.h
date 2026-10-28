@@ -22,6 +22,13 @@ struct reply_sink {
 	void (*null)(void *ctx, const char *name);
 };
 
+/* one of the daemon's two file folders, as the health reply shows it (storage.h checks it; the reply only carries it) */
+struct reply_storage {
+	int ready;				/* the folder was proven: there, writable, room enough */
+	int err;				/* why not, an errno value (0 when ready) */
+	unsigned long long free_mb;		/* the room left on its filesystem (0 when not ready) */
+};
+
 /* what the replies need besides the core's status: facts of the daemon itself */
 struct reply_info {
 	int line_in_service;			/* 0: the core is not running (status then says "down") */
@@ -37,6 +44,13 @@ struct reply_info {
 	int hd;					/* the HD voice state: 0 off, 1 wanted but the modem not switched yet, 2 on */
 	const char *const *leds;		/* the router's LED names for the page's selector */
 	int nleds;				/* the count, or a negative errno from the scan */
+	int machine_greeting;			/* a greeting is loaded: the answering machine may answer */
+	unsigned int machine_greeting_ms;	/* its length, milliseconds (0 without a greeting) */
+	unsigned int machine_delay_s;		/* the wait before the machine answers */
+	const char *record_path;		/* the recordings folder ("" when none is configured) */
+	const char *message_path;		/* the answering machine's messages folder */
+	struct reply_storage record_store;	/* the recordings folder's last check */
+	struct reply_storage message_store;	/* the messages folder's last check */
 };
 
 /* the status.state word of a line state: idle, offhook, ring, call, noservice (api.h) */

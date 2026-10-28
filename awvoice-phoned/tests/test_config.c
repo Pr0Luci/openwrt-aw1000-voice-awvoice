@@ -65,6 +65,10 @@ static unsigned int get_pause(const struct aw_config *c) { return c->dial_pause_
 static unsigned int get_trace(const struct aw_config *c) { return (unsigned int)c->level_trace; }
 static unsigned int get_record_enabled(const struct aw_config *c) { return (unsigned int)c->record_enabled; }
 static unsigned int get_record_max(const struct aw_config *c) { return c->record_max_mb; }
+static unsigned int get_machine_enabled(const struct aw_config *c) { return (unsigned int)c->machine_enabled; }
+static unsigned int get_machine_delay(const struct aw_config *c) { return c->machine_delay_s; }
+static unsigned int get_machine_max_mb(const struct aw_config *c) { return c->machine_max_mb; }
+static unsigned int get_machine_max_s(const struct aw_config *c) { return c->machine_max_s; }
 
 static void test_defaults(void)
 {
@@ -118,6 +122,11 @@ static void test_recording_options(void)
 	assert(config_set(&c, "record_path", "/mnt/usb/rec", f) == 0 && !strcmp(c.record_path, "/mnt/usb/rec"));
 	assert(config_set(&c, "record_path", "recordings", f) == -EINVAL && !strcmp(c.record_path, "/mnt/usb/rec"));	/* absolute paths only */
 	assert(config_set(&c, "record_path", "", f) == -EINVAL);
+	/* the trailing slashes go: the page and the shell can both paste a folder the same way */
+	assert(config_set(&c, "record_path", "/mnt/usb/rec/", f) == 0 && !strcmp(c.record_path, "/mnt/usb/rec"));
+	assert(config_set(&c, "record_path", "/mnt/usb/rec///", f) == 0 && !strcmp(c.record_path, "/mnt/usb/rec"));
+	assert(config_set(&c, "record_path", "/", f) == -EINVAL && !strcmp(c.record_path, "/mnt/usb/rec"));	/* the root is the system's */
+	assert(config_set(&c, "record_path", "/mnt/us\nb", f) == -EINVAL && !strcmp(c.record_path, "/mnt/usb/rec"));	/* one log line per message */
 	memset(longpath, 'a', AW_CONFIG_PATH_MAX - 1);
 	longpath[0] = '/';
 	longpath[AW_CONFIG_PATH_MAX - 1] = 0;
@@ -125,6 +134,49 @@ static void test_recording_options(void)
 	longpath[AW_CONFIG_PATH_MAX - 1] = 'a';
 	longpath[AW_CONFIG_PATH_MAX] = 0;
 	assert(config_set(&c, "record_path", longpath, f) == -EINVAL);
+	fclose(f);
+}
+
+/* the answering machine is off until it is switched on; the greeting is a file and the messages a directory, so
+ * both are absolute paths; the delay counts from the call's first listing and 0 answers at once */
+static void test_machine_options(void)
+{
+	struct aw_config c;
+	char longpath[AW_CONFIG_PATH_MAX + 2];
+	FILE *f = log_open();
+
+	config_defaults(&c);
+	assert(c.machine_enabled == 0);
+	assert(!strcmp(c.machine_greeting, "/etc/awvoice/greeting.wav"));
+	assert(c.machine_delay_s == 10);
+	assert(!strcmp(c.machine_path, "/etc/awvoice/messages"));
+	assert(c.machine_max_mb == 50 && c.machine_max_s == 120);
+	edge("machine_enabled", 0, 1, get_machine_enabled);
+	edge("machine_delay", 0, 60, get_machine_delay);
+	edge("machine_max_mb", 1, 4095, get_machine_max_mb);
+	edge("machine_max_s", 10, 600, get_machine_max_s);
+	config_defaults(&c);
+	assert(config_set(&c, "machine_enabled", "1", f) == 0 && c.machine_enabled == 1);
+	assert(config_set(&c, "machine_enabled", "2", f) == -EINVAL && c.machine_enabled == 1);
+	assert(config_set(&c, "machine_greeting", "/mnt/usb/hello.wav", f) == 0 && !strcmp(c.machine_greeting, "/mnt/usb/hello.wav"));
+	assert(config_set(&c, "machine_greeting", "hello.wav", f) == -EINVAL && !strcmp(c.machine_greeting, "/mnt/usb/hello.wav"));
+	assert(config_set(&c, "machine_greeting", "", f) == -EINVAL);
+	memset(longpath, 'a', AW_CONFIG_PATH_MAX - 1);
+	longpath[0] = '/';
+	longpath[AW_CONFIG_PATH_MAX - 1] = 0;
+	assert(config_set(&c, "machine_greeting", longpath, f) == 0 && strlen(c.machine_greeting) == AW_CONFIG_PATH_MAX - 1);
+	longpath[AW_CONFIG_PATH_MAX - 1] = 'a';
+	longpath[AW_CONFIG_PATH_MAX] = 0;
+	assert(config_set(&c, "machine_greeting", longpath, f) == -EINVAL);
+	assert(config_set(&c, "machine_path", "/mnt/usb/messages", f) == 0 && !strcmp(c.machine_path, "/mnt/usb/messages"));
+	assert(config_set(&c, "machine_path", "messages", f) == -EINVAL && !strcmp(c.machine_path, "/mnt/usb/messages"));
+	assert(config_set(&c, "machine_path", "", f) == -EINVAL);
+	assert(config_set(&c, "machine_path", "/mnt/usb/messages/", f) == 0 && !strcmp(c.machine_path, "/mnt/usb/messages"));
+	assert(config_set(&c, "machine_path", "/", f) == -EINVAL && !strcmp(c.machine_path, "/mnt/usb/messages"));
+	/* the message limit is seconds and the budget megabytes: each has its own edges above */
+	assert(config_set(&c, "machine_delay", "0", f) == 0 && c.machine_delay_s == 0);
+	assert(config_set(&c, "machine_delay", "60", f) == 0 && c.machine_delay_s == 60);
+	assert(config_set(&c, "machine_delay", "61", f) == -EINVAL && c.machine_delay_s == 60);
 	fclose(f);
 }
 
@@ -322,6 +374,57 @@ static void test_cross_rule(void)
 	fclose(f);
 }
 
+/* the two folders are told apart, because one prune and one "Delete all" would otherwise act on the other
+ * feature's files; an unusable path falls back to its default with one line, and the flash rule still runs */
+static void test_folders(void)
+{
+	struct aw_config c;
+	FILE *f = log_open();
+
+	config_defaults(&c);
+	config_finish(&c, f);			/* the defaults are already distinct: nothing said */
+	assert(!strcmp(c.record_path, "/etc/awvoice/recordings") && !strcmp(c.machine_path, "/etc/awvoice/messages"));
+	assert(!*log_text(f));
+
+	/* both set to one folder: the messages move to their default */
+	assert(config_set(&c, "record_path", "/mnt/usb/voice", f) == 0);
+	assert(config_set(&c, "machine_path", "/mnt/usb/voice", f) == 0);
+	config_finish(&c, f);
+	assert(!strcmp(c.record_path, "/mnt/usb/voice") && !strcmp(c.machine_path, "/etc/awvoice/messages"));
+	assert(strstr(log_text(f), "/mnt/usb/voice") && strstr(log_text(f), "/etc/awvoice/messages"));
+
+	/* the recordings took the messages' default: the messages go to a hidden folder inside them, which their own
+	 * listing and prune never look at */
+	config_defaults(&c);
+	assert(config_set(&c, "record_path", "/etc/awvoice/messages", f) == 0);
+	config_finish(&c, f);
+	assert(!strcmp(c.record_path, "/etc/awvoice/messages"));
+	assert(!strcmp(c.machine_path, "/etc/awvoice/messages/.messages"));
+	assert(strstr(log_text(f), "/etc/awvoice/messages/.messages"));
+
+	/* an unusable path is put back to its default and said; one that is merely untidy is only tidied, and the
+	 * machine's switch is left alone */
+	fclose(f);
+	f = log_open();
+	config_defaults(&c);
+	assert(config_set(&c, "machine_enabled", "1", f) == 0);
+	snprintf(c.record_path, sizeof(c.record_path), "%s", "/");
+	snprintf(c.machine_path, sizeof(c.machine_path), "%s", "/mnt//usb");
+	config_finish(&c, f);
+	assert(!strcmp(c.record_path, "/etc/awvoice/recordings") && !strcmp(c.machine_path, "/mnt/usb"));
+	assert(c.machine_enabled == 1);
+	assert(strstr(log_text(f), "recording folder"));
+
+	/* a path repaired there does not skip the flash rule that follows it */
+	config_defaults(&c);
+	assert(config_set(&c, "flash_min_ms", "450", f) == 0);
+	snprintf(c.machine_path, sizeof(c.machine_path), "%s", "");
+	config_finish(&c, f);
+	assert(!strcmp(c.machine_path, "/etc/awvoice/messages"));
+	assert(c.flash_min_ms == 80 && c.flash_max_ms == 300);
+	fclose(f);
+}
+
 int main(void)
 {
 	test_defaults();
@@ -333,6 +436,8 @@ int main(void)
 	test_clir_hotline();
 	test_waiting_options();
 	test_recording_options();
+	test_machine_options();
+	test_folders();
 	test_unknown_names();
 	test_cross_rule();
 	free(log_buf);

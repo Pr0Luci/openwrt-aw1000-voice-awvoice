@@ -97,6 +97,10 @@ return baseclass.extend({
 				return [ 'w', 'bell', _('Ringing'), num ? _('Incoming call from %s. Lift the handset to answer.').format(num)
 					: _('Incoming call from a withheld number. Lift the handset to answer.') ];
 			case 'call':
+				if (st.machine === 'answering' || st.machine === 'answered')
+					return [ '', 'message', _('Answering machine'), st.machine === 'answering'
+						? _('The call is being answered; the phone has stopped ringing.')
+						: _('The greeting is played to the caller, then the message is recorded.') ];
 				return [ '', 'phone', _('In call'), c && c.phase !== 'active' ? phaseWord(c) : _('Handset is off hook.') ];
 			case 'noservice':
 				return [ 'w', 'alert', _('No service'), _('The modem has no mobile service. Calls cannot be made until it returns.') ];
@@ -123,7 +127,8 @@ return baseclass.extend({
 			if (c) {
 				var name = (c.name || ctx.nameFor(c.number));
 				remote.textContent = name ? name + ' ' + c.number : c.number || _('Withheld');
-				dirLbl.textContent = c.direction === 'OUT' ? _('Outgoing') : _('Incoming');
+				dirLbl.textContent = st.machine === 'answering' || st.machine === 'answered' ? _('Answering machine')
+					: c.direction === 'OUT' ? _('Outgoing') : _('Incoming');
 				if (c.phase === 'active') {
 					base = c.elapsedSec;
 					since = Date.now();

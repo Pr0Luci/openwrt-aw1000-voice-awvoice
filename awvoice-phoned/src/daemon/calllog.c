@@ -45,7 +45,8 @@ enum calllog_type calllog_type_of(enum phone_dir dir, enum phone_result r)
 	return r == PHONE_RES_MISSED ? CALLLOG_MISS : CALLLOG_IN;
 }
 
-void calllog_add(struct calllog *l, const struct phone_call_record *rec, unsigned long long ts_epoch_s, const char *recording)
+void calllog_add(struct calllog *l, const struct phone_call_record *rec, unsigned long long ts_epoch_s,
+		 const char *recording, const char *message)
 {
 	struct calllog_entry *e;
 
@@ -62,6 +63,7 @@ void calllog_add(struct calllog *l, const struct phone_call_record *rec, unsigne
 	e->result = rec->result;
 	e->cause = rec->cause;
 	snprintf(e->recording, sizeof(e->recording), "%s", recording && recording[0] ? recording : "");
+	snprintf(e->message, sizeof(e->message), "%s", message && message[0] ? message : "");
 	l->ram_dirty = l->flash_dirty = 1;
 }
 
@@ -98,15 +100,13 @@ static int write_file(const struct calllog *l, const char *path)
 	for (k = 0; k < l->n; k++) {
 		const struct calllog_entry *e = &l->e[k];
 
+		fprintf(f, "{\"id\":%u,\"type\":\"%s\",\"number\":\"%s\",\"ts\":%llu,\"durationSec\":%u,\"result\":\"%s\",\"cause\":%d",
+			e->id, calllog_type_name(e->type), e->number, e->ts, e->duration_s, phone_result_name(e->result), e->cause);
 		if (e->recording[0])
-			fprintf(f, "{\"id\":%u,\"type\":\"%s\",\"number\":\"%s\",\"ts\":%llu,\"durationSec\":%u,\"result\":\"%s\",\"cause\":%d,\"recording\":\"%s\"}%s\n",
-				e->id, calllog_type_name(e->type), e->number, e->ts, e->duration_s, phone_result_name(e->result), e->cause,
-				e->recording,
-				k + 1 < l->n ? "," : "");
-		else
-			fprintf(f, "{\"id\":%u,\"type\":\"%s\",\"number\":\"%s\",\"ts\":%llu,\"durationSec\":%u,\"result\":\"%s\",\"cause\":%d}%s\n",
-				e->id, calllog_type_name(e->type), e->number, e->ts, e->duration_s, phone_result_name(e->result), e->cause,
-			k + 1 < l->n ? "," : "");
+			fprintf(f, ",\"recording\":\"%s\"", e->recording);
+		if (e->message[0])
+			fprintf(f, ",\"message\":\"%s\"", e->message);	/* the answering machine's: a call can carry both */
+		fprintf(f, "}%s\n", k + 1 < l->n ? "," : "");
 	}
 	fputs("]\n", f);
 	if (fflush(f) || ferror(f) || fsync(fileno(f)))
@@ -181,6 +181,23 @@ static int result_parse(const char *text, enum phone_result *r)
 	return 0;
 }
 
+/* an optional text field of a record line into `out`; a missing one leaves `out` empty (the file grew a field later) */
+static void text_opt(const char *line, const char *key, char *out, size_t cap)
+{
+	const char *c = field(line, key);
+
+	out[0] = 0;
+	if (c && *c == '"') {
+		const char *close = strchr(c + 1, '"');
+		size_t len = close ? (size_t)(close - c - 1) : 0;
+
+		if (close && len < cap) {
+			memcpy(out, c + 1, len);
+			out[len] = 0;
+		}
+	}
+}
+
 static int parse_line(const char *line, struct calllog_entry *e)
 {
 	unsigned long long id, ts, dur, cause;
@@ -193,16 +210,8 @@ static int parse_line(const char *line, struct calllog_entry *e)
 	    !text_field(line, "result", result, sizeof(result)) || calllog_type_parse(type, &e->type) ||
 	    !result_parse(result, &e->result) || strlen(number) > PHONE_NUMBER_MAX || id == 0 || id > 0xffffffffu || dur > 0xffffffffu)
 		return 0;
-	c = field(line, "recording");		/* optional: recordings arrived after the log did */
-	if (c && *c == '"') {
-		const char *close = strchr(c + 1, '"');
-		size_t len = close ? (size_t)(close - c - 1) : 0;
-
-		if (close && len < sizeof(e->recording)) {
-			memcpy(e->recording, c + 1, len);
-			e->recording[len] = 0;
-		}
-	}
+	text_opt(line, "recording", e->recording, sizeof(e->recording));	/* optional: recordings arrived after the log did */
+	text_opt(line, "message", e->message, sizeof(e->message));		/* and so did the answering machine */
 	c = field(line, "cause");		/* may be negative in principle; ours are not */
 	if (!c)
 		return 0;

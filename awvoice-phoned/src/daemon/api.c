@@ -21,9 +21,11 @@
 
 #include "api.h"
 #include "indicator.h"
+#include "machine.h"
 #include "recording.h"
 #include "reply.h"
 #include "slic_map.h"
+#include "storage.h"
 
 static struct api_ctx *the_api;		/* the object's handlers have no user pointer: one object, one daemon */
 static struct blob_buf reply_buf, event_buf;
@@ -109,7 +111,17 @@ static void info_of(const struct api_ctx *a, struct reply_info *info)
 		.module_loaded = access("/sys/module/awvoice_fxs", F_OK) == 0,
 		.ind = a->ind,
 		.hd = a->hd,
+		.machine_delay_s = a->machine_delay_s,
+		.record_path = a->record_path,
+		.message_path = a->message_path,
+		.record_store = a->record_store,
+		.message_store = a->message_store,
 	};
+	if (a->machine) {
+		info->machine_greeting = a->machine->enabled;
+		if (a->machine->enabled)
+			info->machine_greeting_ms = (unsigned int)((long long)a->machine->frames[0] * 1000 / 8000);
+	}
 	if (a->bridge_stats) {
 		struct awfxs_bridge_stats bs;
 
@@ -281,71 +293,88 @@ static int m_calls_delete(struct ubus_context *ctx, struct ubus_object *obj, str
 	return send_reply(ctx, req);
 }
 
-/* ---- the recordings (awvoice.record.*): the files are named <epoch>-<call id>.wav, nothing else is ever served ------ */
+/* ---- the recordings and the machine's messages: the files are named <epoch>-<call id>.wav, nothing else is served --- */
 
-/* only the daemon's own recording names pass: digits and dashes, ending .wav - a path or a dot can never get through */
+#define RECORDING_CHUNK	24576		/* raw bytes per reply: 32768 base64 characters, inside a ubus reply */
+
+/* only the daemon's own file names pass, by the same rule the folder's prune and its tmp clean use (storage.h):
+ * <epoch>-<call id>.wav. A path, a dot or another program's file can never get through */
 static int recording_name_ok(const char *name)
 {
-	size_t i, len = strlen(name);
-
-	if (len < 5 || len > 64 || strcmp(name + len - 4, ".wav"))
-		return 0;
-	for (i = 0; i < len - 4; i++) {
-		char c = name[i];
-
-		if (!((c >= '0' && c <= '9') || c == '-'))
-			return 0;
-	}
-	return 1;
+	return storage_name_ok(name);
 }
 
-static void recording_path_of(const struct api_ctx *a, const char *name, char *out, size_t cap)
+static void recording_path_of(const char *dir, const char *name, char *out, size_t cap)
 {
-	snprintf(out, cap, "%s/%s", a->record_path ? a->record_path : "", name);
+	snprintf(out, cap, "%s/%s", dir ? dir : "", name);
+}
+
+/* the epoch a name begins with: the call's answer, by the recorder's naming rule; -1 when it does not carry one
+ * (the reply carries it as a 32-bit number) */
+static long long name_epoch(const char *name)
+{
+	unsigned long long epoch, id;
+
+	if (storage_name_ids(name, &epoch, &id) || epoch > 0xffffffffull)
+		return -1;
+	return (long long)epoch;
+}
+
+/* one directory of the daemon's finished WAV files, as the array `field`: a file whose header does not probe (one
+ * still being written, or not ours) is never named. `with_ts` adds the epoch in the name, for the message list. */
+static void list_wavs(const char *dir, const char *field, int with_ts)
+{
+	char path[256];
+	struct dirent *e;
+	DIR *d = dir ? opendir(dir) : NULL;
+	void *array = blobmsg_open_array(&reply_buf, field);
+
+	while (d && (e = readdir(d)) != NULL) {
+		unsigned char hdr[44];
+		long long ts = with_ts ? name_epoch(e->d_name) : -1;
+		u32 rate = 0, channels = 0, data = 0;
+		void *entry;
+		FILE *f;
+
+		if (!recording_name_ok(e->d_name))
+			continue;
+		if (snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >= (int)sizeof(path))
+			continue;
+		f = fopen(path, "r");
+		if (!f || fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || recording_wav_probe(hdr, &rate, &channels, &data)) {
+			if (f)
+				fclose(f);
+			continue;		/* not a finished recording of ours: never named, never listed */
+		}
+		fclose(f);
+		entry = blobmsg_open_table(&reply_buf, NULL);
+		blobmsg_add_string(&reply_buf, "name", e->d_name);
+		blobmsg_add_u32(&reply_buf, "bytes", data + 44);
+		blobmsg_add_u32(&reply_buf, "rate", rate);
+		blobmsg_add_u32(&reply_buf, "channels", channels);
+		blobmsg_add_u32(&reply_buf, "seconds", rate ? data / rate / channels / 2 : 0);	/* two bytes a sample */
+		if (ts >= 0)
+			blobmsg_add_u32(&reply_buf, "ts", (uint32_t)ts);
+		blobmsg_close_table(&reply_buf, entry);
+	}
+	if (d)
+		closedir(d);
+	blobmsg_close_array(&reply_buf, array);
 }
 
 static int m_recordings(struct ubus_context *ctx, struct ubus_object *obj, struct ubus_request_data *req, const char *method, struct blob_attr *msg)
 {
-	char path[256];
-	struct dirent *e;
-	DIR *dir;
-	void *array;
-
 	(void)obj; (void)method; (void)msg;
 	blob_buf_init(&reply_buf, 0);
-	array = blobmsg_open_array(&reply_buf, "recordings");
-	dir = the_api->record_path ? opendir(the_api->record_path) : NULL;
-	if (dir) {
-		while ((e = readdir(dir)) != NULL) {
-			FILE *f;
-			unsigned char hdr[44];
-			u32 rate = 0, channels = 0, data = 0;
+	list_wavs(the_api->record_path, "recordings", 0);
+	return send_reply(ctx, req);
+}
 
-			if (!recording_name_ok(e->d_name))
-				continue;
-			if (snprintf(path, sizeof(path), "%s/%s", the_api->record_path, e->d_name) >= (int)sizeof(path))
-				continue;
-			f = fopen(path, "r");
-			if (!f || fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || recording_wav_probe(hdr, &rate, &channels, &data)) {
-				if (f)
-					fclose(f);
-				continue;		/* not a finished recording of ours: never named, never listed */
-			}
-			fclose(f);
-			{
-				void *entry = blobmsg_open_table(&reply_buf, NULL);
-
-				blobmsg_add_string(&reply_buf, "name", e->d_name);
-				blobmsg_add_u32(&reply_buf, "bytes", data + 44);
-				blobmsg_add_u32(&reply_buf, "rate", rate);
-				blobmsg_add_u32(&reply_buf, "channels", channels);
-				blobmsg_add_u32(&reply_buf, "seconds", rate ? data / rate / channels / 2 : 0);	/* two bytes a sample */
-				blobmsg_close_table(&reply_buf, entry);
-			}
-		}
-		closedir(dir);
-	}
-	blobmsg_close_array(&reply_buf, array);
+static int m_messages(struct ubus_context *ctx, struct ubus_object *obj, struct ubus_request_data *req, const char *method, struct blob_attr *msg)
+{
+	(void)obj; (void)method; (void)msg;
+	blob_buf_init(&reply_buf, 0);
+	list_wavs(the_api->message_path, "messages", 1);
 	return send_reply(ctx, req);
 }
 
@@ -355,10 +384,9 @@ static const struct blobmsg_policy recording_get_policy[RG_MAX] = {
 	[RG_OFFSET] = { .name = "offset", .type = BLOBMSG_TYPE_INT32 }
 };
 
-/* one chunk of a recording, base64 (a ubus reply is small; the page walks the offsets until "more" is 0) */
-static int m_recording_get(struct ubus_context *ctx, struct ubus_object *obj, struct ubus_request_data *req, const char *method, struct blob_attr *msg)
+/* one chunk of a file of `dir`, base64 (a ubus reply is small; the page walks the offsets until "more" is 0) */
+static int file_chunk(struct ubus_context *ctx, struct ubus_request_data *req, struct blob_attr *msg, const char *dir)
 {
-#define RECORDING_CHUNK	24576			/* raw bytes per reply: 32768 base64 characters, inside a ubus reply */
 	char path[256];
 	struct blob_attr *tb[RG_MAX];
 	unsigned char *raw;
@@ -369,15 +397,14 @@ static int m_recording_get(struct ubus_context *ctx, struct ubus_object *obj, st
 	struct stat st;
 	u32 take;
 
-	(void)obj; (void)method;
 	blobmsg_parse(recording_get_policy, RG_MAX, tb, blob_data(msg), blob_len(msg));
 	if (!tb[RG_NAME] || !tb[RG_OFFSET])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 	name = blobmsg_get_string(tb[RG_NAME]);
 	offset = blobmsg_get_u32(tb[RG_OFFSET]);
-	if (!recording_name_ok(name) || !the_api->record_path)
+	if (!recording_name_ok(name) || !dir)
 		return UBUS_STATUS_INVALID_ARGUMENT;
-	recording_path_of(the_api, name, path, sizeof(path));
+	recording_path_of(dir, name, path, sizeof(path));
 	f = fopen(path, "r");
 	if (!f)
 		return UBUS_STATUS_NOT_FOUND;
@@ -414,29 +441,52 @@ static int m_recording_get(struct ubus_context *ctx, struct ubus_object *obj, st
 	return send_reply(ctx, req);
 }
 
+static int m_recording_get(struct ubus_context *ctx, struct ubus_object *obj, struct ubus_request_data *req, const char *method, struct blob_attr *msg)
+{
+	(void)obj; (void)method;
+	return file_chunk(ctx, req, msg, the_api->record_path);
+}
+
+static int m_message_get(struct ubus_context *ctx, struct ubus_object *obj, struct ubus_request_data *req, const char *method, struct blob_attr *msg)
+{
+	(void)obj; (void)method;
+	return file_chunk(ctx, req, msg, the_api->message_path);
+}
+
 enum { RD_NAME, RD_MAX };
 static const struct blobmsg_policy recording_delete_policy[RD_MAX] = { [RD_NAME] = { .name = "name", .type = BLOBMSG_TYPE_STRING } };
 
-static int m_recording_delete(struct ubus_context *ctx, struct ubus_object *obj, struct ubus_request_data *req, const char *method, struct blob_attr *msg)
+static int file_delete(struct ubus_context *ctx, struct ubus_request_data *req, struct blob_attr *msg, const char *dir)
 {
 	char path[256];
 	struct blob_attr *tb[RD_MAX];
 	const char *name;
 	int removed;
 
-	(void)obj; (void)method;
 	blobmsg_parse(recording_delete_policy, RD_MAX, tb, blob_data(msg), blob_len(msg));
 	if (!tb[RD_NAME])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 	name = blobmsg_get_string(tb[RD_NAME]);
-	if (!recording_name_ok(name) || !the_api->record_path)
+	if (!recording_name_ok(name) || !dir)
 		return UBUS_STATUS_INVALID_ARGUMENT;
-	recording_path_of(the_api, name, path, sizeof(path));
+	recording_path_of(dir, name, path, sizeof(path));
 	removed = unlink(path) == 0;
 	blob_buf_init(&reply_buf, 0);
 	blobmsg_add_u8(&reply_buf, "ok", removed);
 	blobmsg_add_u8(&reply_buf, "removed", removed);
 	return send_reply(ctx, req);
+}
+
+static int m_recording_delete(struct ubus_context *ctx, struct ubus_object *obj, struct ubus_request_data *req, const char *method, struct blob_attr *msg)
+{
+	(void)obj; (void)method;
+	return file_delete(ctx, req, msg, the_api->record_path);
+}
+
+static int m_message_delete(struct ubus_context *ctx, struct ubus_object *obj, struct ubus_request_data *req, const char *method, struct blob_attr *msg)
+{
+	(void)obj; (void)method;
+	return file_delete(ctx, req, msg, the_api->message_path);
 }
 
 /* the line test answers late: the request is held until the samples are in (api_tick) */
@@ -489,6 +539,9 @@ static const struct ubus_method methods[] = {
 	UBUS_METHOD_NOARG("recordings", m_recordings),
 	UBUS_METHOD("recording_get", m_recording_get, recording_get_policy),
 	UBUS_METHOD("recording_delete", m_recording_delete, recording_delete_policy),
+	UBUS_METHOD_NOARG("messages", m_messages),
+	UBUS_METHOD("message_get", m_message_get, recording_get_policy),
+	UBUS_METHOD("message_delete", m_message_delete, recording_delete_policy),
 };
 
 static struct ubus_object_type object_type = UBUS_OBJECT_TYPE("awvoice", methods);
@@ -554,6 +607,8 @@ void api_event(void *ctx, const struct phone_event *ev)
 {
 	struct api_ctx *a = ctx;
 
+	if (ev->kind == PHONE_EV_MACHINE)
+		return;			/* not a change of the call itself: the machine is read from the status reply */
 	if (ev->kind == PHONE_EV_LINE) {
 		send_event(a, "awvoice.line", fill_line, &ev->line);
 		return;

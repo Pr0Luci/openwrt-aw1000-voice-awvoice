@@ -156,4 +156,45 @@ struct awfxs_tap_read {
 #define AWFXS_IOC_TAP_SET	_IOW(AWFXS_IOC_MAGIC, 10, __u32)	/* 1 arm, 0 disarm */
 #define AWFXS_IOC_TAP_READ	_IOWR(AWFXS_IOC_MAGIC, 11, struct awfxs_tap_read)
 
+/*
+ * Playback ring. While armed (and a bridge is running) the bridge takes one frame from a ring the writer fills and
+ * sends it in place of what the bridge mode would have sent that frame: modem goes to the modem's transmit position,
+ * line to the line's. Arming needs a running bridge; the ring is cleared on arming and both counters restart. A ring
+ * that runs dry sends digital silence and counts an underrun — never the last frame again, so a stalled writer is
+ * heard and counted, not hidden. The playback disarms on every bridge stop or restart and bumps the generation, the
+ * same rule as the capture tap. What arrives from the modem or the line chip is unaffected: the capture tap keeps
+ * mirroring it, and a wideband bridge ignores the second samples when it is narrowband.
+ * Each frame written is one awfxs_play_frame: four little-endian __u16 — modem, line, wideband second modem,
+ * wideband second line.
+ */
+struct awfxs_play_frame {
+	__u16 modem;
+	__u16 line;
+	__u16 modem2;
+	__u16 line2;
+};
+
+struct awfxs_play_write {
+	__u64 buf;		/* in: user array of frames, four __u16 each */
+	__u32 frames;		/* in: frames offered */
+	__u32 written;		/* out: frames stored; the rest are counted dropped */
+	__u32 dropped;		/* out: frames refused because the ring was full, since the arm */
+	__u32 generation;	/* out: changes on every bridge stop / restart */
+	__u32 pad;
+};
+
+struct awfxs_play_status {
+	__u32 armed;
+	__u32 stored;		/* frames waiting for the bridge */
+	__u32 dropped;		/* frames refused because the ring was full, since the arm */
+	__u32 underruns;	/* frames sent as silence because the ring was empty, since the arm */
+	__u64 frames;		/* frames the bridge answered from here since the arm, silent ones included */
+	__u32 generation;	/* changes on every bridge stop / restart */
+	__u32 pad;
+};
+
+#define AWFXS_IOC_PLAY_SET	_IOW(AWFXS_IOC_MAGIC, 12, __u32)	/* 1 arm, 0 disarm */
+#define AWFXS_IOC_PLAY_WRITE	_IOWR(AWFXS_IOC_MAGIC, 13, struct awfxs_play_write)
+#define AWFXS_IOC_PLAY_READ	_IOR(AWFXS_IOC_MAGIC, 14, struct awfxs_play_status)
+
 #endif /* _UAPI_LINUX_AW_FXS_H */

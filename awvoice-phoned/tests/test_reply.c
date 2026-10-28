@@ -190,11 +190,16 @@ static void test_status_idle(void)
 	struct phone_status st = blank();
 
 	assert(!strcmp(status_json(&j, &st, &running, 5000),
-		"{\"state\":\"idle\",\"line\":\"idle\",\"hook\":\"on\",\"call\":null,"
+		"{\"state\":\"idle\",\"line\":\"idle\",\"hook\":\"on\",\"machine\":\"none\",\"call\":null,"
 		"\"voiceNetwork\":{\"registered\":null,\"ims\":null},\"signal\":{\"rsrpDbm\":null,\"network\":null},"
 		"\"service\":{\"running\":true},\"myNumber\":\"\"}"));
 	st.off_hook = 1;
 	assert(strstr(status_json(&j, &st, &running, 5000), "\"hook\":\"off\""));
+	/* the answering machine's part: the answer on its way, then the call it holds */
+	st.machine = PHONE_MACHINE_ANSWERING;
+	assert(strstr(status_json(&j, &st, &running, 5000), "\"machine\":\"answering\""));
+	st.machine = PHONE_MACHINE_ANSWERED;
+	assert(strstr(status_json(&j, &st, &running, 5000), "\"machine\":\"answered\""));
 }
 
 static void test_status_down(void)
@@ -205,7 +210,7 @@ static void test_status_down(void)
 
 	info.line_in_service = 0;
 	assert(!strcmp(status_json(&j, &st, &info, 5000),
-		"{\"state\":\"down\",\"line\":\"down\",\"hook\":null,\"call\":null,"
+		"{\"state\":\"down\",\"line\":\"down\",\"hook\":null,\"machine\":null,\"call\":null,"
 		"\"voiceNetwork\":{\"registered\":null,\"ims\":null},\"signal\":{\"rsrpDbm\":null,\"network\":null},"
 		"\"service\":{\"running\":true},\"myNumber\":\"\"}"));
 }
@@ -283,7 +288,10 @@ static void test_health(void)
 		"\"modem\":{\"simReady\":null,\"registered\":null,\"imsRegistered\":null,\"rsrpDbm\":null,\"network\":null,\"audioSlave\":null,\"hdVoice\":\"off\",\"callWaiting\":null,\"clir\":null,\"clirStatus\":null},"
 		"\"system\":{\"moduleLoaded\":true,\"bridge\":{\"running\":null,\"frames\":null,\"resyncs\":null,\"txSkipped\":null,\"maxGapUs\":null}},"
 		"\"indicator\":{\"led\":null,\"state\":\"off\",\"leds\":null},"
-		"\"counters\":{\"modemTimeouts\":2,\"hookGapsOver20ms\":1,\"hookGapMaxMs\":31,\"faults\":4}}"));
+		"\"counters\":{\"modemTimeouts\":2,\"hookGapsOver20ms\":1,\"hookGapMaxMs\":31,\"faults\":4},"
+		"\"machine\":{\"greetingLoaded\":false,\"greetingMs\":0,\"delaySec\":0},"
+		"\"storage\":{\"recordings\":{\"path\":\"\",\"ready\":false,\"freeMb\":null,\"error\":null},"
+		"\"messages\":{\"path\":\"\",\"ready\":false,\"freeMb\":null,\"error\":null}}}"));
 
 	/* a modem that never answered: no reply time; the bridge counters when the kernel gave them */
 	st.modem_up = 0;
@@ -296,12 +304,31 @@ static void test_health(void)
 	info.bridge_resyncs = 3;
 	info.bridge_tx_skipped = 2;
 	info.bridge_max_gap_us = 1400;
+	/* the answering machine's greeting is loaded: its length and the wait the page shows */
+	info.machine_greeting = 1;
+	info.machine_greeting_ms = 4250;
+	info.machine_delay_s = 10;
+	/* the two folders: the recordings one is proven and measured, the messages one is not there (the page warns) */
+	info.record_path = "/mnt/sda1/awvoice";
+	info.record_store = (struct reply_storage){ .ready = 1, .free_mb = 1234 };
+	info.message_path = "/etc/awvoice/messages";
+	info.message_store = (struct reply_storage){ .ready = 0, .err = ENOENT };
 	begin(&j, &sink);
 	reply_health(&sink, &st, &info, 10500);
 	end(&j);
 	assert(strstr(j.text, "\"atPort\":{\"port\":\"\",\"usbInterface\":2,\"responding\":false,\"lastReplyAgoSec\":null}"));
 	assert(strstr(j.text, "\"audioSlave\":true"));
 	assert(strstr(j.text, "\"bridge\":{\"running\":true,\"frames\":5000000000,\"resyncs\":3,\"txSkipped\":2,\"maxGapUs\":1400}"));
+	assert(strstr(j.text, "\"machine\":{\"greetingLoaded\":true,\"greetingMs\":4250,\"delaySec\":10}"));
+	assert(strstr(j.text, "\"recordings\":{\"path\":\"/mnt/sda1/awvoice\",\"ready\":true,\"freeMb\":1234,\"error\":null}"));
+	assert(strstr(j.text, "\"messages\":{\"path\":\"/etc/awvoice/messages\",\"ready\":false,\"freeMb\":null,\"error\":\"No such file or directory\"}"));
+
+	/* a /mnt folder whose drive is not mounted says so, rather than "No such device" */
+	info.message_store = (struct reply_storage){ .ready = 0, .err = ENODEV };
+	begin(&j, &sink);
+	reply_health(&sink, &st, &info, 10500);
+	end(&j);
+	assert(strstr(j.text, "\"error\":\"the drive is not mounted\"}"));
 
 	/* the line out of service */
 	info.line_in_service = 0;
@@ -364,12 +391,12 @@ static void test_calls(void)
 	begin(&j, &sink);
 	reply_calls(&sink, l, NULL);
 	assert(!strcmp(end(&j), "{\"calls\":[]}"));
-	calllog_add(l, &a, 1700000000, NULL);
-	calllog_add(l, &o, 1700000100, NULL);
+	calllog_add(l, &a, 1700000000, NULL, "1700000000-1.wav");
+	calllog_add(l, &o, 1700000100, NULL, NULL);
 	begin(&j, &sink);
 	reply_calls(&sink, l, NULL);
-	assert(!strcmp(end(&j), "{\"calls\":[{\"id\":2,\"type\":\"OUT\",\"number\":\"45\",\"name\":\"\",\"ts\":1700000100,\"durationSec\":0,\"recording\":\"\",\"result\":\"busy\",\"cause\":17},"
-		"{\"id\":1,\"type\":\"IN\",\"number\":\"5551\",\"name\":\"\",\"ts\":1700000000,\"durationSec\":65,\"recording\":\"\",\"result\":\"answered\",\"cause\":0}]}"));
+	assert(!strcmp(end(&j), "{\"calls\":[{\"id\":2,\"type\":\"OUT\",\"number\":\"45\",\"name\":\"\",\"ts\":1700000100,\"durationSec\":0,\"recording\":\"\",\"message\":\"\",\"result\":\"busy\",\"cause\":17},"
+		"{\"id\":1,\"type\":\"IN\",\"number\":\"5551\",\"name\":\"\",\"ts\":1700000000,\"durationSec\":65,\"recording\":\"\",\"message\":\"1700000000-1.wav\",\"result\":\"answered\",\"cause\":0}]}"));
 	/* with a phone book the record carries the contact's name */
 	phonebook_clear(&pb, NULL);
 	assert(!phonebook_add(&pb, "Ann", nums, 1, NULL, stderr));

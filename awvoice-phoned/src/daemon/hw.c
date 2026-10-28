@@ -133,3 +133,22 @@ unsigned int dev_tap_read(struct device *d, struct awfxs_tap_frame *frames, unsi
 		return 0;
 	return meta->got;
 }
+
+int dev_play_set(struct device *d, int on)
+{
+	return ioctl(d->fd, AWFXS_IOC_PLAY_SET, &on) ? -errno : 0;
+}
+
+int dev_play_write(struct device *d, const struct awfxs_play_frame *frames, unsigned int count, struct awfxs_play_write *meta)
+{
+	memset(meta, 0, sizeof(*meta));
+	meta->buf = (unsigned long long)(unsigned long)frames;	/* this process's own buffer: the kernel copies from it */
+	meta->frames = count;
+	return ioctl(d->fd, AWFXS_IOC_PLAY_WRITE, meta) ? -errno : 0;
+}
+
+int dev_play_status(struct device *d, struct awfxs_play_status *out)
+{
+	memset(out, 0, sizeof(*out));
+	return ioctl(d->fd, AWFXS_IOC_PLAY_READ, out) ? -errno : 0;
+}
