@@ -2569,9 +2569,28 @@ static void test_ringback_auto(void)
 	rig_close(&r);
 }
 
+static void test_dead_chip_fails_loud(void)
+{
+	struct rig r;
+	char *log;
+
+	/* a unit whose line chip's own firmware never started (an erased chip flash): the stage
+	 * refuses and names the cause loudly, instead of leaving a silent dead line */
+	rig_init(&r);
+	r.m.mstrstat = 0x00;
+	assert(stage0_identify(&r.c, r.log) == -ENODEV);
+	fflush(r.log);
+	log = r.lbuf;
+	assert(strstr(log, "master status 0x00"));
+	assert(strstr(log, "its own firmware did not start"));
+	fclose(r.log);
+	free(log);
+}
+
 int main(void)
 {
 	test_open_close();
+	test_dead_chip_fails_loud();
 	test_modem_late();
 	test_port_lost_in_call();
 	test_cfg_in_call();
