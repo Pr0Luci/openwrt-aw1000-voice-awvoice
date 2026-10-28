@@ -6,8 +6,13 @@
 #include <linux/types.h>
 #include <linux/ioctl.h>
 
-/* Interface of /dev/awvoice-fxs0. Every structure has a fixed layout; unused fields must be zero. */
-#define AWFXS_ABI		1
+/* Interface of /dev/awvoice-fxs0. Every structure has a fixed layout; unused fields must be zero.
+ * The number is raised whenever a command or a structure changes meaning, and the daemon refuses a module whose number
+ * is not its own (it reads this value through AWFXS_IOC_INFO before anything else):
+ *   1  the first release (1.0.0)
+ *   2  the capture tap (AWFXS_IOC_TAP_*) and the playback ring (AWFXS_IOC_PLAY_*) of the recording and the answering
+ *      machine: a module 1 answers them with ENOTTY, which only shows up once a call is being recorded */
+#define AWFXS_ABI		2
 
 /* awfxs_info.state */
 #define AWFXS_STATE_PLL_UP	0x01
