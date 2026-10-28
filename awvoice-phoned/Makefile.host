@@ -17,7 +17,7 @@ CALLLOG = $(DAEMON)/calllog.c
 INDICATOR = $(DAEMON)/indicator.c
 FAKES = tests/fakes.c tests/fakes.h
 
-TESTS = build/test_hookwatch build/test_config build/test_board build/test_port build/test_daemon build/test_reply build/test_modemq build/test_numbers build/test_calllog build/test_phonebook build/test_blocking build/test_alarm build/test_forward build/test_answer build/test_indicator build/test_recording build/test_recorder build/test_machine build/test_storage
+TESTS = build/test_hookwatch build/test_config build/test_board build/test_port build/test_daemon build/test_reply build/test_modemq build/test_numbers build/test_calllog build/test_phonebook build/test_blocking build/test_alarm build/test_forward build/test_answer build/test_indicator build/test_recording build/test_recorder build/test_machine build/test_storage build/test_module_abi
 
 test: core $(TESTS)
 	build/test_hookwatch && echo "hookwatch: all tests passed"
@@ -39,6 +39,7 @@ test: core $(TESTS)
 	build/test_recorder
 	build/test_machine
 	build/test_storage
+	build/test_module_abi
 
 # every core source compiles on its own, with the sanitizers (the core is also exercised through the stage tool's tests: make -C tools/slic test)
 core: $(CORE_OBJ)
@@ -100,6 +101,9 @@ build/test_machine: tests/test_machine.c $(DAEMON)/machine.c $(DAEMON)/machine.h
 
 build/test_storage: tests/test_storage.c $(DAEMON)/storage.h
 	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_storage.c
+
+build/test_module_abi: tests/test_module_abi.c $(CORE)/module_abi.h
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_module_abi.c
 
 build/test_calllog: tests/test_calllog.c $(CALLLOG) $(DAEMON)/calllog.h $(CORE)/result.c $(CORE_HDR)
 	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_calllog.c $(CALLLOG) $(CORE)/result.c

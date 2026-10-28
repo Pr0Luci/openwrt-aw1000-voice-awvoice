@@ -7,6 +7,8 @@
  *
  * Exit codes: 0 = asked to stop, or the service is switched off, or the line has to be set up again from the start
  * (a changed channel or board); 1 = a fault (procd starts the service again).
+ * The one option, --check-module, is the init script's handshake with the kernel module: it reads the module's interface
+ * number and returns 0, 1 or 2 for it (see check_module below) or 3 when the device cannot be read.
  *
  * The log is stdout, line buffered; procd forwards it to the system log. Never a phone number, a digit or a name.
  */
@@ -21,6 +23,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/file.h>
+#include <sys/ioctl.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
@@ -42,6 +45,7 @@
 #include "hw.h"
 #include "indicator.h"
 #include "machine.h"
+#include "module_abi.h"
 #include "phone.h"
 #include "port.h"
 #include "recorder.h"
@@ -1196,13 +1200,65 @@ static int single_instance(void)
 	return fd;		/* held until the process ends */
 }
 
-int main(void)
+/* the module's interface number is not this build's: the one line both start paths say (the remedy follows the side) */
+static void abi_problem(unsigned int module_abi)
+{
+	printf("the kernel module's interface is %u and this build's is %u: %s\n", module_abi, (unsigned)AWFXS_ABI,
+		module_abi_check(module_abi, AWFXS_ABI) == MODULE_ABI_OLDER
+			? "the loaded module is older; the installed one (/lib/modules) is this daemon's pair"
+			: "the module is newer; this daemon is out of date and its package must be updated");
+}
+
+/*
+ * --check-module: the module's interface number, read before procd starts the daemon, so the init script can replace a
+ * module that did not come from the installed package (the preinit loader reads /etc/modules-boot.d from the firmware
+ * image before the overlay is mounted, so an upgrade can leave the image's older module loaded while the installed one
+ * waits on the overlay). Nothing else is touched: a stopped service leaves the chip in reset, and closing the device
+ * puts it back there.
+ * Exit codes, as the init script reads them: 0 the module is this build's pair; 1 the module is older (loading the
+ * installed module replaces it); 2 the module is newer (only an updated package helps); 3 the device cannot be read.
+ * A device another process holds is not a fault: that daemon checked the same number at its own start.
+ */
+static int check_module(void)
+{
+	struct awfxs_info info;
+	enum module_abi_verdict v;
+	int fd = open("/dev/awvoice-fxs0", O_RDWR);
+
+	if (fd < 0) {
+		if (errno == EBUSY)
+			return 0;
+		printf("/dev/awvoice-fxs0: %s\n", strerror(errno));
+		return 3;
+	}
+	memset(&info, 0, sizeof(info));
+	if (ioctl(fd, AWFXS_IOC_INFO, &info)) {
+		int err = errno;
+
+		close(fd);
+		printf("/dev/awvoice-fxs0 did not answer the interface call: %s\n", strerror(err));
+		return 3;
+	}
+	close(fd);
+	v = module_abi_check(info.abi, AWFXS_ABI);
+	if (v != MODULE_ABI_OK)
+		abi_problem(info.abi);
+	return (int)v;
+}
+
+int main(int argc, char **argv)
 {
 	struct phone_cfg pc;
 	size_t size = 0;
 	int err;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);	/* every line reaches the log even if the board resets mid-run */
+	if (argc > 1) {
+		if (argc == 2 && !strcmp(argv[1], "--check-module"))
+			return check_module();
+		fprintf(stderr, "usage: %s [--check-module]\n", argv[0]);
+		return 1;
+	}
 	if (single_instance() < 0)
 		return 1;
 
@@ -1234,7 +1290,10 @@ int main(void)
 	d.chip = (struct chip){ .ops = &dev_ops, .ctx = &d.dev };
 	err = dev_open(&d.dev);
 	if (err) {
-		report("/dev/awvoice-fxs0", err);
+		if (err == -EPROTO)
+			abi_problem(d.dev.abi);		/* the module is loaded and answers, it is just not this build's */
+		else
+			report("/dev/awvoice-fxs0", err);
 		free(d.board_file);
 		return 1;
 	}
