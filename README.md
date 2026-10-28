@@ -6,7 +6,7 @@ No SIP, no Asterisk, no second number — the cellular network is the exchange a
 
 ## What's new
 
-- Answering machine: after a delay you choose, an unanswered call on the SIM's line hears your greeting and leaves a message on the router. The call log links each call to its own message — play, save or delete it from the call's card on the Calls tab — and the Settings tab shows how much the messages take and deletes them all. Off by default; the greeting is your own WAV file.
+- Answering machine: after a delay you choose, an unanswered call on the SIM's line hears your greeting and leaves a message on the router. The call log links each call to its own message — play, save or delete it from the call's card on the Calls tab — and the Settings tab shows how much the messages take and deletes them all. Off by default, and no greeting ships with the packages: put your own WAV on the router (the Settings tab names the path), ending with a short tone, because the machine plays no tone of its own and does not answer without a greeting.
 - Call recordings: calls you answer land on the router as WAV files and the call log links each call to its own recording — play, save or delete it from the call's card on the Calls tab. Stereo (the caller and the handset on separate channels), 16 kHz with HD voice, opt-in from the Settings tab with a size budget for the storage. The files never carry a phone number. A call the answering machine answered is kept as its message instead.
 
 ## What it does
@@ -21,7 +21,7 @@ No SIP, no Asterisk, no second number — the cellular network is the exchange a
 - Call recording (off by default — a recording may need an announcement where you live; turn it on in Settings): calls you answer land on the router as WAV files, stereo — the caller and the handset on separate channels — at 16 kHz when HD voice is on. The call's own card in the log plays, saves or deletes its recording. A call the answering machine answered is kept as its message instead: when you pick the handset up, the message ends at the lift and the rest of the conversation is not recorded.
 - The recordings never carry a phone number — a file's name is the call's time and id — and a size budget (50 MB by default) removes the oldest when the storage passes it.
 - Both storage folders (the recordings and the messages) are made and checked when the service starts or reloads, and again before a call writes its first file: a missing folder on a mounted drive is created, and a folder that cannot be written — or a drive with almost no space — is reported on the Health tab instead of failing silently. The answering machine does not answer a call it could not keep a message from, so the handset still rings. A folder under `/mnt` is only used once its drive is mounted — never created on the router's own flash under an unmounted mount point — and the two folders are always kept apart.
-- Answering machine (off by default; only calls on the cellular line are answered): after a settable delay — zero answers at once — the greeting you put on the router is played to the caller and what they say is kept as a message. The call log links each call to its message, played, saved or deleted in that call's card; the Settings tab shows the storage the messages take and deletes the whole folder. The greeting must be a 16-bit PCM WAV at 8 or 16 kHz; a file the machine cannot read switches it off rather than answer with noise. Messages get their own size budget and a longest-message limit, and their names carry no phone number. Picking up the handset during the machine's call hands the call over; the part of the message already recorded is kept — the classic answering-machine (TAD) behaviour, the same in standard voicemail systems.
+- Answering machine (off by default; only calls on the cellular line are answered): after a settable delay — zero answers at once — the greeting you put on the router is played to the caller and what they say is kept as a message. The greeting is yours to supply: the packages carry none, and with no readable file the machine stays off and the handset keeps ringing. It must be a 16-bit PCM WAV at 8 or 16 kHz, mono or stereo, ending with a short tone — the machine plays no tone of its own, so a greeting without one leaves the caller no cue; a file the machine cannot read switches it off rather than answer with noise. The call log links each call to its message, played, saved or deleted in that call's card; the Settings tab shows the storage the messages take and deletes the whole folder. Messages get their own size budget and a longest-message limit, and their names carry no phone number. Picking up the handset during the machine's call hands the call over; the part of the message already recorded is kept — the classic answering-machine (TAD) behaviour, the same in standard voicemail systems.
 - Emergency numbers always ring through: nothing on the router blocks or drops them.
 
 **A note on safety and emergencies:** the RJ11 contacts sit at about 46 V, and higher while the phone rings. This is not certified telephone equipment — do not rely on it for emergency calls, and check the rules that apply to you before connecting anything to the telephone network.
@@ -90,6 +90,17 @@ uci commit awvoice
 Or simply reboot instead: at the next boot everything starts by itself — the board file is installed and the phone line comes ready.
 
 Defaults fit the AW1000 — the board file ships with the package and the rest is automatic; the settings the page does not show (the modem's AT interface number, the LED name) live in `/etc/config/awvoice` with sensible values.
+
+### A greeting for the answering machine
+
+No greeting ships with the packages: the machine plays the file you put on the router, and without one it does not answer. Record or make a 16-bit PCM WAV at 8 or 16 kHz (mono or stereo), end it with a short tone, and copy it to the path the Settings tab shows (default `/etc/awvoice/greeting.wav`):
+
+```
+scp greeting.wav root@192.168.1.1:/etc/awvoice/greeting.wav
+/etc/init.d/awvoice restart
+```
+
+The service reads the file when it starts. The answering-machine card in Settings then says whether the greeting was loaded and how long it is — a file it cannot read is reported there and the machine stays off instead of answering with noise.
 
 ## Host tests
 
