@@ -75,7 +75,7 @@ apk add --allow-untrusted awvoice-phoned-*.apk kmod-awvoice-fxs-*.apk luci-app-a
 reboot
 ```
 
-The module is built for kernel 6.12.94 (OpenWrt 25.12.5) on aarch64; a module for another kernel will not load. `SHA256SUMS` in the release has the checksums and `build-info.txt` the commit and the SDK the packages came from. The packages are not signed, hence `--allow-untrusted`.
+The module is built for kernel 6.12.94 (OpenWrt 25.12.5) on aarch64; its package depends on that exact kernel build, so `apk` refuses it on another kernel instead of leaving a module behind that cannot load. `SHA256SUMS` in the release has the checksums and `build-info.txt` the commit and the SDK the packages came from. The packages are not signed, hence `--allow-untrusted`.
 
 ## Installing
 
