@@ -43,7 +43,9 @@ struct cid_guard {
 	void *ctx;
 };
 
-/* send one message: the seizure, the mark and the data bytes; the oscillator registers are put back afterwards */
+/* send one message: the seizure, the mark and the data bytes; the oscillator registers are put back afterwards. The
+ * line goes back to the state it was found in, a ringing one as forward active (the chip starts a burst whenever the
+ * line enters the ringing state; the caller puts the ring back on at the cadence's own time) */
 int cid_send(struct chip *c, const struct board *b, unsigned int ch, int standard, const uint8_t *msg, size_t len,
 	const struct cid_guard *guard, FILE *log);
 

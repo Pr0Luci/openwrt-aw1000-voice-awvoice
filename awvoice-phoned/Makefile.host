@@ -17,12 +17,13 @@ CALLLOG = $(DAEMON)/calllog.c
 INDICATOR = $(DAEMON)/indicator.c
 FAKES = tests/fakes.c tests/fakes.h
 
-TESTS = build/test_hookwatch build/test_config build/test_board build/test_port build/test_daemon build/test_reply build/test_modemq build/test_numbers build/test_calllog build/test_phonebook build/test_blocking build/test_alarm build/test_forward build/test_answer build/test_indicator build/test_recording build/test_recorder build/test_machine build/test_storage build/test_module_abi
+TESTS = build/test_hookwatch build/test_config build/test_board build/test_cid build/test_port build/test_daemon build/test_reply build/test_modemq build/test_numbers build/test_calllog build/test_phonebook build/test_blocking build/test_alarm build/test_forward build/test_answer build/test_indicator build/test_recording build/test_recorder build/test_machine build/test_storage build/test_module_abi
 
 test: core $(TESTS)
 	build/test_hookwatch && echo "hookwatch: all tests passed"
 	build/test_config
 	build/test_board
+	build/test_cid
 	build/test_port
 	build/test_daemon
 	build/test_reply
@@ -56,6 +57,9 @@ build/test_config: tests/test_config.c $(DAEMON)/config.c $(DAEMON)/config.h $(D
 
 build/test_board: tests/test_board.c $(CORE)/board.c $(CORE)/board.h
 	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_board.c $(CORE)/board.c
+
+build/test_cid: tests/test_cid.c $(CORE)/cid.c $(CORE)/cid.h $(CORE)/board.c $(CORE)/board.h $(CORE)/chip.c $(CORE)/chip.h $(FAKES)
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_cid.c tests/fakes.c $(CORE)/cid.c $(CORE)/board.c $(CORE)/chip.c
 
 build/test_numbers: tests/test_numbers.c $(CORE)/numbers.c $(CORE)/numbers.h
 	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_numbers.c $(CORE)/numbers.c
