@@ -33,8 +33,9 @@ define KernelPackage/awvoice-fxs/description
   that puts the chip back in reset when the phone daemon stops. Source: GPL-2.0-only.
 endef
 
-# the boot-time entry 1.1.0 wrote is gone from the package; an upgrade that kept the file loses it here (see the top)
-define KernelPackage/awvoice-fxs/postinst
+# the boot-time entry 1.1.0 wrote is gone from the package; an upgrade that kept it loses it here (see the top).
+# The hook is named for the package the kernel machinery builds (kmod-awvoice-fxs), not for the KernelPackage section.
+define Package/kmod-awvoice-fxs/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 if [ -e /etc/modules-boot.d/50-awvoice-fxs ]; then
