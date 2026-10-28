@@ -10,6 +10,7 @@
 #include <linux/awvoice-fxs.h>
 
 #include "hw.h"
+#include "module_abi.h"
 
 #define WATCHDOG_MS	3000
 #define PCM_CTRL	0x31000002u	/* host-FIFO mode, 16-bit slots, receive phase 2 */
@@ -68,9 +69,31 @@ const struct chip_ops dev_ops = { .frame = frame, .pause_ms = pause_ms, .now_ms 
 
 int dev_open(struct device *d)
 {
+	struct awfxs_info info;
+	int err;
+
+	d->abi = 0;
 	d->fed_ms = 0;
 	d->fd = open("/dev/awvoice-fxs0", O_RDWR);
-	return d->fd < 0 ? -errno : 0;
+	if (d->fd < 0)
+		return -errno;
+	/* the module's interface number first: a module that is not this build's answers the commands below with ENOTTY,
+	 * some of them only once a call is being recorded (module_abi.h) */
+	memset(&info, 0, sizeof(info));
+	if (ioctl(d->fd, AWFXS_IOC_INFO, &info)) {
+		err = -errno;
+		goto fail;
+	}
+	d->abi = info.abi;
+	if (module_abi_check(info.abi, AWFXS_ABI) != MODULE_ABI_OK) {
+		err = -EPROTO;
+		goto fail;
+	}
+	return 0;
+fail:
+	close(d->fd);
+	d->fd = -1;
+	return err;
 }
 
 int dev_prepare(struct device *d, int wideband)

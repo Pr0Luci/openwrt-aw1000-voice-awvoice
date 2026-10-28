@@ -35,10 +35,31 @@ start_service() {
 			logger -t awvoice "installed the default board file at $board"
 	fi
 	[ -r "$board" ] || { logger -t awvoice "board file $board missing"; return 1; }
-	# the kernel module package (kmod-awvoice-fxs) loads awvoice_fxs at boot with register writes allowed (its /etc/modules.d line); if it was
-	# unloaded since, it is loaded again the same way (the parameter is fixed at load time)
+	# the kernel module package (kmod-awvoice-fxs) loads awvoice_fxs at boot from /etc/modules.d, after the overlay is
+	# mounted, with register writes allowed (the package's MODPARAMS line); if it was unloaded since, it is loaded again
+	# the same way (the parameter is fixed at load time)
 	[ -d /sys/module/awvoice_fxs ] || insmod "/lib/modules/$(uname -r)/awvoice_fxs.ko" allow_write=1 2>/dev/null
 	[ -d /sys/module/awvoice_fxs ] || { logger -t awvoice "kernel module awvoice_fxs is not loaded (package kmod-awvoice-fxs)"; return 1; }
+	# the module and this daemon are one pair: the daemon sends the module's commands by number. A module loaded from
+	# the firmware image answers with another number than the installed one (1.1.0 put a boot-time entry in
+	# /etc/modules-boot.d, which the preinit loader reads before the overlay is mounted, so an upgrade kept the image's
+	# older module loaded). The installed module is the pair this daemon needs: unload and load it again.
+	local out
+	out=$("$PROG" --check-module 2>&1)
+	case $? in
+	0) ;;
+	2)
+		logger -t awvoice "the loaded awvoice_fxs is newer than this daemon ($out): the service is not started (update awvoice-phoned)"
+		return 1
+		;;
+	*)
+		logger -t awvoice "the loaded awvoice_fxs is not this daemon's module ($out): loading the installed module"
+		rmmod awvoice_fxs 2>/dev/null
+		insmod "/lib/modules/$(uname -r)/awvoice_fxs.ko" allow_write=1 2>/dev/null
+		out=$("$PROG" --check-module 2>&1) || { logger -t awvoice "the installed awvoice_fxs is not this daemon's module either ($out): the service is not started"; return 1; }
+		logger -t awvoice "the installed awvoice_fxs is loaded"
+		;;
+	esac
 
 	procd_open_instance
 	procd_set_param command "$PROG"

@@ -10,12 +10,15 @@
 /* The chip behind /dev/awvoice-fxs0 (kernel module kmod-awvoice-fxs). */
 struct device {
 	int fd;
+	unsigned int abi;		/* the module's interface number as read at open (AWFXS_ABI when the open succeeded) */
 	unsigned long long fed_ms;	/* when the line watchdog was last restarted */
 };
 
 extern const struct chip_ops dev_ops;
 
-int dev_open(struct device *d);		/* 0 or -errno */
+/* 0, or -EPROTO when the module's interface number is not this build's (d->abi holds what it answered), or -errno.
+ * The open reads AWFXS_IOC_INFO first: every command that follows is this build's only when the number matches. */
+int dev_open(struct device *d);
 int dev_prepare(struct device *d, int wideband);	/* clocks running, chip reset with the clocks present, watchdog armed */
 void dev_close(struct device *d);	/* closing holds the chip in reset */
 int dev_bridge(struct device *d, const struct awfxs_bridge *b);	/* 0 or -errno */
