@@ -6,7 +6,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=awvoice-phoned
-PKG_VERSION:=1.1.2
+PKG_VERSION:=1.1.3
 PKG_RELEASE:=1
 PKG_LICENSE:=GPL-2.0-only
 PKG_LICENSE_FILES:=LICENSE
@@ -50,10 +50,14 @@ define Package/awvoice-phoned/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/files/awvoice.init $(1)/etc/init.d/awvoice
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/files/awvoice.config $(1)/etc/config/awvoice
 	$(INSTALL_DATA) files/board.bin $(1)/usr/share/awvoice/board-default.bin
-	# board.bin lives under /etc, which sysupgrade keeps, and the default board
-	# file is reinstalled at the first start if it is gone - it is never listed
-	# here: a package may not ship a file another package already owns
-	# (/etc/sysupgrade.conf belongs to base-files; apk rejects the overlap).
+	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
+	# /etc is NOT kept by sysupgrade: only /etc/config/ and base-files' essential
+	# list are, so a flash would drop the board file, the greeting, the call log,
+	# the messages and the recordings. They all live under /etc/awvoice/, so one
+	# keep.d entry takes the directory across an upgrade and into `sysupgrade -b`
+	# backups. It is a file of this package, not /etc/sysupgrade.conf (that one
+	# belongs to base-files; apk rejects the overlap).
+	printf '/etc/awvoice/\n' > $(1)/lib/upgrade/keep.d/awvoice
 endef
 
 # enabled at boot, not started here: a package install never touches a live phone line (the installer starts it)
