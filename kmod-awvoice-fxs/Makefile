@@ -11,7 +11,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=kmod-awvoice-fxs
-PKG_VERSION:=1.1.2
+PKG_VERSION:=1.1.3
 PKG_RELEASE:=1
 PKG_LICENSE:=GPL-2.0-only
 PKG_LICENSE_FILES:=COPYING
