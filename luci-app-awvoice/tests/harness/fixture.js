@@ -6,12 +6,12 @@
 /*
  * fixture.js - test data for the render check (tests/harness/index.html). It stands in for phone/live.js only in that
  * harness and is not part of the installed package. ?state=idle|offhook|ring|ring_anon|dial|call|noservice|down picks
- * the line state; &m5=1 also switches on the later features with sample records.
+ * the line state; &later=1 also switches on the features the plain fixture leaves unanswered, with sample records.
  */
 
 var q = new URLSearchParams(location.search);
 var STATE = q.get('state') || 'idle';
-var M5 = q.get('m5') === '1';
+var LATER = q.get('later') === '1';
 var now = Math.floor(Date.now() / 1000);
 
 function status() {
@@ -43,24 +43,33 @@ var calls = [
 	{ id: 2, type: 'IN', number: '', ts: now - 4000, durationSec: 75, result: 'answered', cause: 16 },
 	{ id: 3, type: 'OUT', number: '0112223344', ts: now - 90000, durationSec: 0, result: 'busy', cause: 17 }
 ];
-var contacts = [ { id: 1, name: 'Home', numbers: [ { value: '0112223344', type: 'home' } ], quick: '11' } ];
+var contacts = [ { id: 1, name: 'Home', numbers: [ { value: '0112223344', type: 'home' } ], quick: '11', ringThrough: true },
+	{ id: 2, name: 'Doctor', numbers: [ { value: '0770000001', type: 'mobile' } ], quick: '', ringThrough: false } ];
 var blocking = { anonymous: false, incoming: [ '0112000002' ], incomingPrefix: [ '+9477' ], outgoing: [], outgoingPrefix: [] };
 var forwarding = { enabled: false, to: '', when: 'always', delaySec: 20, network: 'unknown' };
 var alarms = [ { id: 1, label: 'Morning', time: '06:30', days: [ 1, 2, 3, 4, 5 ], enabled: true } ];
+var quiet = {
+	windows: [
+		{ id: 'w1', enabled: true, from: '22:00', to: '07:00', allDay: false, days: [ 1, 2, 3, 4, 5 ], mode: 'machine', repeatMin: 15, allow: [ '0771234567' ] },
+		{ id: 'w2', enabled: false, from: '', to: '', allDay: true, days: [ 6, 7 ], mode: 'silent', repeatMin: 0, allow: [] }
+	],
+	allow: [ '0771234567' ]
+};
 
 function later(v) { return Promise.resolve(JSON.parse(JSON.stringify(v))); }
 function notYet() { return Promise.reject(new Error('Not available yet')); }
-function m5(v) { return M5 ? later(v) : notYet(); }
+function served(v) { return LATER ? later(v) : notYet(); }
 
 return baseclass.extend({
 	available: {
 		getStatus: true, getHealth: true, hangup: true, getClock: true, getPhoneSettings: true, savePhoneSettings: true,
-		runTest: true, serviceAction: true, ringTest: true, lineTest: M5, loopbackTest: false,
-		listCalls: M5, deleteCalls: M5, listContacts: M5, saveContact: M5, removeContact: M5,
-		getBlocking: M5, saveBlocking: M5, getForwarding: M5, saveForwarding: M5, listAlarms: M5, saveAlarm: M5, removeAlarm: M5
+		runTest: true, serviceAction: true, ringTest: true, lineTest: LATER, loopbackTest: false,
+		listCalls: LATER, deleteCalls: LATER, listContacts: LATER, saveContact: LATER, removeContact: LATER,
+		getBlocking: LATER, saveBlocking: LATER, getForwarding: LATER, saveForwarding: LATER, listAlarms: LATER, saveAlarm: LATER, removeAlarm: LATER,
+		listQuiet: LATER, saveQuiet: LATER, removeQuiet: LATER, saveQuietAllow: LATER
 	},
 	settingsLive: { cid: true, myNumber: true, dialPauseSec: true, hookFlash: true, ringback: true, earpieceVolume: true,
-		modemRxGain: true, usbInterface: true, micGainDb: M5, earpieceGainDb: M5, clir: M5, led: M5 },
+		modemRxGain: true, usbInterface: true, micGainDb: LATER, earpieceGainDb: LATER, clir: LATER, led: LATER },
 	downStatus: function() {
 		return { state: 'down', line: 'down', hook: null, call: null, voiceNetwork: { registered: null, ims: null },
 			signal: { rsrpDbm: null, network: null }, service: { running: false }, myNumber: '' };
@@ -73,6 +82,7 @@ return baseclass.extend({
 			modem: { simReady: true, registered: true, imsRegistered: true, rsrpDbm: -97, network: 'LTE', audioSlave: true },
 			system: { moduleLoaded: true, bridge: { running: true, frames: 123456, resyncs: 0, txSkipped: 0, maxGapUs: 410 } },
 			counters: { modemTimeouts: 0, hookGapsOver20ms: 1, hookGapMaxMs: 24, faults: 0 },
+			quiet: { on: true, cause: 'window', ask: 'schedule' },
 			log: { tail: [ 'daemon.info awvoice-phoned[312]: line in service', 'daemon.info awvoice-phoned[312]: call 5 active' ] }
 		});
 	},
@@ -80,18 +90,38 @@ return baseclass.extend({
 	getClock: function() { return later({ routerTime: '2026-10-23 09:30', diffMin: 12 }); },
 	getPhoneSettings: function() { return later(settings); },
 	savePhoneSettings: function(p) { settings = JSON.parse(JSON.stringify(p)); return later({ ok: true, refused: null }); },
-	runTest: function(kind) { return kind === 'ring' || M5 && kind === 'line' ? later({ ok: true, refused: null }) : notYet(); },
+	runTest: function(kind) { return kind === 'ring' || LATER && kind === 'line' ? later({ ok: true, refused: null }) : notYet(); },
 	serviceAction: function() { return later({ ok: true, refused: null }); },
-	listCalls: function() { return m5(calls); },
-	deleteCalls: function() { calls = []; return m5({ ok: true }); },
-	listContacts: function() { return m5(contacts); },
-	saveContact: function(c) { return m5(c); },
-	removeContact: function() { return m5({ ok: true }); },
-	getBlocking: function() { return m5(blocking); },
-	saveBlocking: function(b) { blocking = b; return m5(b); },
-	getForwarding: function() { return m5(forwarding); },
-	saveForwarding: function(f) { forwarding = Object.assign({}, f, { network: f.enabled ? 'on' : 'off' }); return m5(forwarding); },
-	listAlarms: function() { return m5(alarms); },
-	saveAlarm: function(a) { return m5(a); },
-	removeAlarm: function() { return m5({ ok: true }); }
+	listCalls: function() { return served(calls); },
+	deleteCalls: function() { calls = []; return served({ ok: true }); },
+	listContacts: function() { return served(contacts); },
+	saveContact: function(c) { return served(c); },
+	removeContact: function() { return served({ ok: true }); },
+	getBlocking: function() { return served(blocking); },
+	saveBlocking: function(b) { blocking = b; return served(b); },
+	getForwarding: function() { return served(forwarding); },
+	saveForwarding: function(f) { forwarding = Object.assign({}, f, { network: f.enabled ? 'on' : 'off' }); return served(forwarding); },
+	listAlarms: function() { return served(alarms); },
+	saveAlarm: function(a) { return served(a); },
+	removeAlarm: function() { return served({ ok: true }); },
+	/* the quiet hours, held the way the settings file holds them: windows in order, and one always-ring list */
+	listQuiet: function() { return served(quiet); },
+	saveQuiet: function(w) {
+		var one = Object.assign({}, w, { id: w.id || String(Date.now()) });
+		var at = quiet.windows.map(function(o) { return o.id; }).indexOf(one.id);
+		if (at >= 0)
+			quiet.windows[at] = one;
+		else
+			quiet.windows.push(one);
+		return served(one);
+	},
+	removeQuiet: function(id) {
+		quiet.windows = quiet.windows.filter(function(o) { return o.id !== String(id); });
+		quiet.allow = [];
+		return served({ ok: true });
+	},
+	saveQuietAllow: function(list) {
+		quiet.allow = list.slice();
+		return served(quiet.allow);
+	}
 });

@@ -38,7 +38,7 @@ enum slic_reg {
 	REG_O1_TALO = 50,		/* four timer registers per oscillator, 50..53 and 54..57 */
 	REG_O2_TALO = 54,
 	REG_RA = 45,			/* line impedance synthesis selection byte */
-	REG_DIGCON = 44,		/* the chip's own dialing controls; bits 0x0c stay off (we dial with AT commands) */
+	REG_DIGCON = 44,		/* the chip's own dialing controls; bits 0x0c stay off (dialling goes over AT commands) */
 	REG_AUTO = 80,
 	REG_USER_MODE = 126,
 };
@@ -65,6 +65,7 @@ enum slic_reg_irq {
 #define IRQEN2_DTMF		0x10		/* its enable bit */
 #define IRQEN2_LCR		0x02		/* the hook event's enable bit */
 #define LCR_ON_HOOK		0x02		/* register 34's off-hook bit */
+#define LCR_RTP			0x01		/* register 34's ring-trip pending bit: the chip's ring trip fired and the line left the ringing state */
 #define TONEN_DTMF_DETECT	0xe0		/* enables the DTMF detector */
 #define ON_HOOK_UA		5000		/* below the border of the two measured loop-current states */
 static const char dtmf_digit_map[] = "D1234567890*#ABC";	/* register 60 code = the low nibble */
@@ -204,7 +205,7 @@ static const struct { uint16_t ram; uint8_t word; } dc_feed_word[DC_FEED_WORDS] 
 
 /*
  * Hook timing (stages 7 and 8): the hook register is read every HOOK_POLL_MS on the monotonic clock and a break is
- * classified by its measured length (packages/awvoice-phoned/src/core/hookwatch.h): the windows are the phone settings
+ * classified by its measured length (src/core/hookwatch.h): the windows are the phone settings
  * page's flash_min_ms and flash_max_ms. What the chip itself passes to the register is not known below a few tens of
  * milliseconds (TO-VERIFY, the hook bench prints it); nothing here assumes a debounce time.
  */
@@ -217,7 +218,7 @@ static const struct { uint16_t ram; uint8_t word; } dc_feed_word[DC_FEED_WORDS] 
 #define CALL_TRY_MAX		3		/* ATA retries before the tool gives up and waits for the next poll */
 #define MODEM_CMD_MAX		48		/* the longest command text (ATD + DIAL_NUMBER_MAX digits + ;) */
 #define MODEM_QUEUE		8		/* commands that may wait for the open request (the keys pressed in a call are among them) */
-#define CALL_FAST_POLL_MS	250		/* the call list is asked for this often while a call is being set up, while our hang-up is pending and just after an answer ... */
+#define CALL_FAST_POLL_MS	250		/* the call list is asked for this often while a call is being set up, while a hang-up sent from here is pending and just after an answer ... */
 #define FAST_AFTER_ANSWER_MS	2000		/* ... which is this long after the answer */
 
 /*
@@ -251,7 +252,10 @@ static const struct { uint16_t ram; uint8_t word; } dc_feed_word[DC_FEED_WORDS] 
  * cause (AT+CEER, the 3GPP TS 24.008 numbering) picks the cadence: number and network problems ring fast
  * (congestion), a busy or an absent caller rings slow (busy).
  */
-#define FLASH_CODE_MS		3000	/* after a flash in a call, the next key within this time is a code (DESIGN.md, call waiting) */
+#define FLASH_CODE_MS		3000	/* after a flash in a call, the next key within this time is a code (the waiting-call and hold keys) */
+#define FLASH_SOFT_MS		100	/* a flash asked from a front end stands in for a hook break this wide: inside the
+					   hook's own flash window (flash_min_ms..flash_max_ms, 80..300 by default), so it is a
+					   flash and neither a bounce nor a hang-up */
 #define WAIT_TONE_ON_MS		500	/* the call waiting tone: a burst this long (ITU-T E.180: 0.1..0.5 s) ... */
 #define WAIT_TONE_PERIOD_MS	5000	/* ... every this long, the short end of the usual repeat (line-tested: the
 					   300 ms / 10 s cadence did not catch the ear) */
@@ -393,7 +397,7 @@ static const struct { uint16_t ram; uint8_t off; } imped_ram_word[] = {
  * words come from the board file's "ring" section, preset 0 (four presets of RING_PRESET_SIZE bytes, the stock
  * firmware's own values; they differ in amplitude and the ring control byte only). The preset's byte offsets
  * follow the field order of the manufacturer's documented structure, checked against the board file: the
- * words are listed in the order they are written. The ring cadence is ours: the chip's own timers count in
+ * words are listed in the order they are written. The ring cadence is this driver's own: the chip's own timers count in
  * RING_TIMER_US and make the on/off cadence by themselves, so the stop latency does not depend on this tool.
  */
 #define LF_CODE_RING		0x4

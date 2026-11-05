@@ -66,7 +66,7 @@ static bool pll_already_running(struct aw_pll __iomem *p)
 
 /*
  * The PLL is started only when nobody else uses it: a vote from the clock controller, or a running PLL with
- * other settings, is somebody else's and is left alone. A PLL that already runs with our settings is used as
+ * other settings, is somebody else's and is left alone. A PLL that already runs with the settings asked for here is used as
  * it is; only a PLL started here is stopped again when the module is unloaded.
  */
 static int pll_start(struct awfxs *z)

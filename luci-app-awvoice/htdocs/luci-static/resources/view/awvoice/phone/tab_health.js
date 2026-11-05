@@ -15,6 +15,12 @@ function yn(v, yes, no) {
 	return v ? [ yes, 'av-ok' ] : [ no, 'av-err' ];
 }
 
+/* the network the line is on: what the modem calls it, with the country code beside it when both are known */
+function netWord(name, mcc) {
+	if (name && mcc) return name + ' (' + mcc + ')';
+	return name || mcc || '—';
+}
+
 function count(v) {
 	return v == null ? '—' : String(v);
 }
@@ -31,16 +37,38 @@ function folder(s) {
 	return [ _('Not checked yet'), 'av-mut' ];
 }
 
+/*
+ * Quiet hours, as the line answered just now. The daemon's three words (whether, what decided it, and what was asked
+ * of it) are the facts; the sentence is this card's. An answer that never came is "not known", not "may ring": a
+ * daemon that does not publish the block is not saying the line is free to ring.
+ */
+function quietNow(q) {
+	if (!q || q.on == null)
+		return [ _('Not known yet'), 'av-mut' ];
+	if (q.on) {
+		if (q.cause === 'manual')
+			return [ _('Quiet now - asked by hand'), 'av-warn' ];
+		if (q.cause === 'all-day')
+			return [ _('Quiet now - an all-day window covers this hour'), 'av-warn' ];
+		if (q.cause === 'window')
+			return [ _('Quiet now - a window covers this hour'), 'av-warn' ];
+		return [ _('Quiet now'), 'av-warn' ];
+	}
+	if (q.ask === 'ringing')
+		return [ _('The line may ring - turned off by hand'), 'av-ok' ];
+	return [ _('The line may ring'), 'av-ok' ];
+}
+
 return baseclass.extend({
 	render: function(ctx) {
 		var u = ctx.ui, busyCall = false, down = false;
 
 		var banIcon = u.icon('radio'), banTitle = E('b', _('Modem AT port')), banSub = E('div', { 'class': 'av-sub' });
-		var ban = E('div', { 'class': 'av-ban', 'role': 'status' }, [ banIcon, E('div', [ banTitle, banSub ]) ]);
+		var ban = E('div', { 'class': 'av-ban alert-message', 'role': 'status' }, [ banIcon, E('div', [ banTitle, banSub ]) ]);
 
 		var at = E('div'), line = E('div'), modem = E('div'), sys = E('div'), store = E('div');
-		var counters = E('div', { 'class': 'av-tiles' }), logTail = E('div', { 'class': 'av-log av-mono' });
-		var gone = E('div', { 'class': 'av-ban e', 'role': 'status' }, [ u.icon('alert'), E('div', _('The phone service does not answer, so there is no health data. Start it below.')) ]);
+		var counters = E('div', { 'class': 'av-tiles' }), logTail = E('div', { 'class': 'av-log cbi-input-text av-mono' });
+		var gone = E('div', { 'class': 'av-ban alert-message error', 'role': 'status' }, [ u.icon('alert'), E('div', _('The phone service does not answer, so there is no health data. Start it below.')) ]);
 		gone.hidden = true;
 
 		var bStart = u.button(_('Start'), 'play', '', function() { act('start'); });
@@ -86,7 +114,7 @@ return baseclass.extend({
 		ctx.on('health', function(h) {
 			gone.hidden = !!h;
 			if (!h) {
-				ban.className = 'av-ban e';
+				ban.className = 'av-ban alert-message error';
 				banSub.textContent = _('No answer from the phone service.');
 				[ at, line, modem, sys, store, counters ].forEach(function(n) { n.textContent = ''; });
 				storeNote.textContent = '';
@@ -95,7 +123,7 @@ return baseclass.extend({
 			}
 
 			var okAt = h.atPort.responding;
-			ban.className = 'av-ban ' + (okAt ? '' : 'w');
+			ban.className = 'av-ban alert-message' + (okAt ? '' : ' warning');
 			banSub.textContent = okAt
 				? (h.atPort.lastReplyAgoSec == null ? _('Modem AT port responding.') : _('Modem AT port responding. Last reply %d s ago.').format(h.atPort.lastReplyAgoSec))
 				: _('Modem AT port is not responding.');
@@ -111,10 +139,13 @@ return baseclass.extend({
 			var hook = h.line.hook == null ? [ _('Unknown'), 'av-mut' ] : [ h.line.hook === 'off' ? _('Off hook') : _('On hook'), '' ];
 			var cal = yn(h.line.calibrated, _('Done'), _('Not done'));
 			var chip = yn(h.line.calibrated, _('Answering'), _('Not answering'));
+			var q = quietNow(h.quiet);
 			fill(line, [
 				[ _('Line chip'), chip[0], chip[1] ],
 				[ _('Hook (ch%s)').format(count(h.line.channel)), hook[0], hook[1] ],
 				[ _('State'), h.line.state || '—' ],
+				[ _('Quiet hours'), q[0], q[1] ],
+				[ _('Numbering'), h.line.numbering || '—' ],
 				[ _('Calibration'), cal[0], cal[1] ],
 				[ _('Battery'), h.line.batteryMv == null ? '—' : (h.line.batteryMv / 1000).toFixed(1) + ' V', 'av-mono' ],
 				[ _('Loop current'), h.line.loopUa == null ? '—' : (h.line.loopUa / 1000).toFixed(1) + ' mA', 'av-mono' ]
@@ -128,6 +159,7 @@ return baseclass.extend({
 				[ _('SIM'), sim[0], sim[1] ], [ _('Network registration'), reg[0], reg[1] ], [ _('VoLTE registration'), ims[0], ims[1] ],
 				[ _('Signal (RSRP)'), h.modem.rsrpDbm == null ? '—' : h.modem.rsrpDbm + ' dBm', 'av-mono' ],
 				[ _('Network'), h.modem.network || '—' ],
+				[ _('Operator'), netWord(h.modem.operatorName, h.modem.operator) ],
 				[ _('Audio mode'), audio[0], audio[1] ]
 			]);
 
@@ -155,7 +187,7 @@ return baseclass.extend({
 			counters.textContent = '';
 			[ [ _('Modem timeouts'), h.counters.modemTimeouts ], [ _('Hook gaps over 20 ms'), h.counters.hookGapsOver20ms ],
 				[ _('Longest hook gap (ms)'), h.counters.hookGapMaxMs ], [ _('Faults'), h.counters.faults ] ]
-				.forEach(function(s) { counters.appendChild(E('div', { 'class': 'av-tile' }, [ E('small', s[0]), E('b', count(s[1])) ])); });
+				.forEach(function(s) { counters.appendChild(E('div', { 'class': 'av-tile cbi-section' }, [ E('small', s[0]), E('b', count(s[1])) ])); });
 
 			logTail.textContent = h.log.tail.length ? h.log.tail.join('\n') : _('No log lines.');
 		});

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 Pr0Luci
-/* How a finished call ended (phone.h): the call log's result words. */
+/* The call's word tables (phone.h): how a finished call ended, and who answered it. */
 #include "phone.h"
 
 enum phone_result phone_result_of(enum phone_dir dir, int answered, int refused, int blocked, int cause)
@@ -21,4 +21,11 @@ const char *phone_result_name(enum phone_result r)
 	static const char *const names[] = { "answered", "missed", "rejected", "blocked", "busy", "no_answer", "failed" };
 
 	return (unsigned int)r < sizeof(names) / sizeof(names[0]) ? names[r] : "failed";
+}
+
+const char *phone_answered_by_name(enum phone_answered_by who)
+{
+	static const char *const names[] = { "none", "handset", "machine", "web", "sip" };
+
+	return (unsigned int)who < sizeof(names) / sizeof(names[0]) ? names[who] : "none";
 }

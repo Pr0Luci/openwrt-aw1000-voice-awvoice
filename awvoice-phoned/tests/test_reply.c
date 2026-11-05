@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "fakes.h"
+#include "dnd.h"
 #include "phone.h"
 #include "phonebook.h"
 #include "reply.h"
@@ -120,7 +121,7 @@ static struct phone_status blank(void)
 	struct phone_status st;
 
 	memset(&st, 0, sizeof(st));
-	st.sim_ready = st.registered = st.ims_registered = st.audio_slave = st.clir = st.clir_status = st.call_waiting_net = PHONE_UNKNOWN;
+	st.sim_ready = st.registered = st.ims_registered = st.audio_slave = st.audio_rate = st.clir = st.clir_status = st.call_waiting_net = PHONE_UNKNOWN;
 	st.signal_dbm = PHONE_DBM_UNKNOWN;
 	return st;
 }
@@ -190,11 +191,15 @@ static void test_status_idle(void)
 	struct phone_status st = blank();
 
 	assert(!strcmp(status_json(&j, &st, &running, 5000),
-		"{\"state\":\"idle\",\"line\":\"idle\",\"hook\":\"on\",\"machine\":\"none\",\"call\":null,"
-		"\"voiceNetwork\":{\"registered\":null,\"ims\":null},\"signal\":{\"rsrpDbm\":null,\"network\":null},"
+		"{\"state\":\"idle\",\"line\":\"idle\",\"hook\":\"on\",\"machine\":\"none\",\"quiet\":false,\"call\":null,"
+		"\"voiceNetwork\":{\"registered\":null,\"ims\":null},\"signal\":{\"rsrpDbm\":null,\"network\":null,\"operator\":null,\"operatorName\":null},"
 		"\"service\":{\"running\":true},\"myNumber\":\"\"}"));
 	st.off_hook = 1;
 	assert(strstr(status_json(&j, &st, &running, 5000), "\"hook\":\"off\""));
+	/* quiet hours cover the caller the network offers: the call is there, the sound is not */
+	st.quiet = 1;
+	assert(strstr(status_json(&j, &st, &running, 5000), "\"quiet\":true"));
+	st.quiet = 0;
 	/* the answering machine's part: the answer on its way, then the call it holds */
 	st.machine = PHONE_MACHINE_ANSWERING;
 	assert(strstr(status_json(&j, &st, &running, 5000), "\"machine\":\"answering\""));
@@ -210,8 +215,8 @@ static void test_status_down(void)
 
 	info.line_in_service = 0;
 	assert(!strcmp(status_json(&j, &st, &info, 5000),
-		"{\"state\":\"down\",\"line\":\"down\",\"hook\":null,\"machine\":null,\"call\":null,"
-		"\"voiceNetwork\":{\"registered\":null,\"ims\":null},\"signal\":{\"rsrpDbm\":null,\"network\":null},"
+		"{\"state\":\"down\",\"line\":\"down\",\"hook\":null,\"machine\":null,\"quiet\":null,\"call\":null,"
+		"\"voiceNetwork\":{\"registered\":null,\"ims\":null},\"signal\":{\"rsrpDbm\":null,\"network\":null,\"operator\":null,\"operatorName\":null},"
 		"\"service\":{\"running\":true},\"myNumber\":\"\"}"));
 }
 
@@ -259,7 +264,9 @@ static void test_status_modem_fields(void)
 	st.ims_registered = 0;
 	st.signal_dbm = -95;
 	snprintf(st.network, sizeof(st.network), "%s", "4G");
-	assert(strstr(status_json(&j, &st, &info, 5000), "\"voiceNetwork\":{\"registered\":true,\"ims\":false},\"signal\":{\"rsrpDbm\":-95,\"network\":\"4G\"}"));
+	assert(strstr(status_json(&j, &st, &info, 5000), "\"voiceNetwork\":{\"registered\":true,\"ims\":false},\"signal\":{\"rsrpDbm\":-95,\"network\":\"4G\",\"operator\":null,\"operatorName\":null}"));
+	snprintf(st.mcc, sizeof(st.mcc), "%s", "404");	/* the network the line is registered on, three digits */
+	assert(strstr(status_json(&j, &st, &info, 5000), "\"signal\":{\"rsrpDbm\":-95,\"network\":\"4G\",\"operator\":\"404\",\"operatorName\":null}"));
 	assert(strstr(j.text, "\"myNumber\":\"*88\""));
 	info.my_number = NULL;
 	assert(strstr(status_json(&j, &st, &info, 5000), "\"myNumber\":\"\""));
@@ -283,15 +290,117 @@ static void test_health(void)
 	begin(&j, &sink);
 	reply_health(&sink, &st, &info, 10500);
 	assert(!strcmp(end(&j),
-		"{\"atPort\":{\"port\":\"/dev/ttyUSB2\",\"usbInterface\":2,\"responding\":true,\"lastReplyAgoSec\":7},"
-		"\"line\":{\"channel\":1,\"hook\":\"on\",\"state\":\"idle\",\"calibrated\":true,\"batteryMv\":59111,\"loopUa\":-903},"
-		"\"modem\":{\"simReady\":null,\"registered\":null,\"imsRegistered\":null,\"rsrpDbm\":null,\"network\":null,\"audioSlave\":null,\"hdVoice\":\"off\",\"callWaiting\":null,\"clir\":null,\"clirStatus\":null},"
+		"{\"atPort\":{\"port\":\"/dev/ttyUSB2\",\"usbInterface\":2,\"responding\":true,\"lastReplyAgoSec\":7,\"portOwner\":\"free\"},"
+		"\"line\":{\"channel\":1,\"numbering\":\"\",\"hook\":\"on\",\"state\":\"idle\",\"calibrated\":true,\"batteryMv\":59111,\"loopUa\":-903},"
+		"\"modem\":{\"simReady\":null,\"registered\":null,\"imsRegistered\":null,\"rsrpDbm\":null,\"network\":null,\"operator\":null,\"operatorName\":null,\"audioSlave\":null,\"hdVoice\":\"off\",\"audioRate\":null,\"voiceLayout\":8000,\"callWaiting\":null,\"clir\":null,\"clirStatus\":null},"
 		"\"system\":{\"moduleLoaded\":true,\"bridge\":{\"running\":null,\"frames\":null,\"resyncs\":null,\"txSkipped\":null,\"maxGapUs\":null}},"
 		"\"indicator\":{\"led\":null,\"state\":\"off\",\"leds\":null},"
 		"\"counters\":{\"modemTimeouts\":2,\"hookGapsOver20ms\":1,\"hookGapMaxMs\":31,\"faults\":4},"
-		"\"machine\":{\"greetingLoaded\":false,\"greetingMs\":0,\"delaySec\":0},"
+		"\"machine\":{\"greetingLoaded\":false,\"greetingMs\":0,\"greetingError\":\"\",\"delaySec\":0},"
+		"\"quiet\":{\"on\":false,\"cause\":\"\",\"ask\":\"schedule\"},"
 		"\"storage\":{\"recordings\":{\"path\":\"\",\"ready\":false,\"freeMb\":null,\"error\":null},"
-		"\"messages\":{\"path\":\"\",\"ready\":false,\"freeMb\":null,\"error\":null}}}"));
+		"\"messages\":{\"path\":\"\",\"ready\":false,\"freeMb\":null,\"error\":null}},"
+		"\"web\":{\"mode\":\"web\",\"audio\":\"off\",\"port\":0,\"address\":\"\"},"
+		"\"sip\":{\"objectOwner\":\"none\",\"lastRefusal\":\"\",\"consumerPid\":0}}"));
+
+	/* the numbering plan in force, and the network code it was chosen from: both reach the health reply */
+	{
+		struct reply_sink sink;
+		const char *text;
+
+		info.region = "IN";
+		snprintf(st.mcc, sizeof(st.mcc), "%s", "404");
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"line\":{\"channel\":1,\"numbering\":\"IN\""));
+		assert(strstr(text, "\"operator\":\"404\",\"operatorName\":null"));
+		snprintf(st.netname, sizeof(st.netname), "%s", "Dialog Dialog");
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"operator\":\"404\",\"operatorName\":\"Dialog Dialog\""));
+		info.region = NULL;
+		st.mcc[0] = 0;
+		st.netname[0] = 0;
+	}
+
+	/* quiet hours: the answer the windows and the clock add up to, and the ask the handset's code left behind */
+	{
+		struct reply_sink sink;
+		const char *text;
+		struct dnd d;
+
+		dnd_clear(&d, NULL);
+		d.now.clock_known = 1;
+		d.now.weekday = 3;
+		d.now.minute = 1400;			/* this minute is inside tonight's window */
+		assert(dnd_window_add(&d, 1, "22:00", "07:00", DND_DAYS_EVERY, 0, DND_MODE_SILENT, 0, NULL) == 0);
+		info.dnd = &d;
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"quiet\":{\"on\":true,\"cause\":\"window\",\"ask\":\"schedule\"}"));
+		/* the same window at a minute outside it: the reply reads the clock the line reads, to the minute */
+		d.now.minute = 600;				/* ten in the morning, after tonight's window ended at seven */
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"quiet\":{\"on\":false,\"cause\":\"\",\"ask\":\"schedule\"}"));
+		d.now.minute = 1400;
+		/* the line taken off quiet by hand: no window overrides that */
+		d.manual = DND_MANUAL_OFF;
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"quiet\":{\"on\":false,\"cause\":\"\",\"ask\":\"ringing\"}"));
+		/* quiet asked for whatever the clock says */
+		d.manual = DND_MANUAL_ON;
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"quiet\":{\"on\":true,\"cause\":\"manual\",\"ask\":\"quiet\"}"));
+		/* a clock that has not been told the date honours no window */
+		d.manual = DND_MANUAL_AUTO;
+		d.now.clock_known = 0;
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"quiet\":{\"on\":false,\"cause\":\"\",\"ask\":\"schedule\"}"));
+		/* the whole day, named as such: the window is written the way the settings write it */
+		d.manual = DND_MANUAL_AUTO;
+		dnd_clear(&d, NULL);
+		d.now.clock_known = 1;
+		d.now.weekday = 3;
+		d.now.minute = 1400;
+		assert(dnd_window_add(&d, 1, "00:00", "00:00", DND_DAYS_EVERY, 1, DND_MODE_REJECT, 0, NULL) == 0);
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"quiet\":{\"on\":true,\"cause\":\"all-day\",\"ask\":\"schedule\"}"));
+		/* a weekday the window does not name is not quiet, whatever the minute says */
+		dnd_clear(&d, NULL);
+		d.now.clock_known = 1;
+		d.now.weekday = 3;				/* Wednesday */
+		d.now.minute = 1400;
+		assert(dnd_window_add(&d, 1, "22:00", "07:00", DND_DAY_FRI, 0, DND_MODE_SILENT, 0, NULL) == 0);
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"quiet\":{\"on\":false,\"cause\":\"\",\"ask\":\"schedule\"}"));
+		/* the same window on the day it names */
+		d.now.weekday = 5;
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"quiet\":{\"on\":true,\"cause\":\"window\",\"ask\":\"schedule\"}"));
+		/* a daemon that read no quiet hours at all: nothing is on, and the ask is the settings' own */
+		info.dnd = NULL;
+		begin(&j, &sink);
+		reply_health(&sink, &st, &info, 10500);
+		text = end(&j);
+		assert(strstr(text, "\"quiet\":{\"on\":false,\"cause\":\"\",\"ask\":\"schedule\"}"));
+	}
 
 	/* a modem that never answered: no reply time; the bridge counters when the kernel gave them */
 	st.modem_up = 0;
@@ -304,9 +413,10 @@ static void test_health(void)
 	info.bridge_resyncs = 3;
 	info.bridge_tx_skipped = 2;
 	info.bridge_max_gap_us = 1400;
-	/* the answering machine's greeting is loaded: its length and the wait the page shows */
+	/* the answering machine's greeting is loaded: its length and the wait the page shows, and no word to say */
 	info.machine_greeting = 1;
 	info.machine_greeting_ms = 4250;
+	info.machine_greeting_err = reply_greeting_word(0);
 	info.machine_delay_s = 10;
 	/* the two folders: the recordings one is proven and measured, the messages one is not there (the page warns) */
 	info.record_path = "/mnt/sda1/awvoice";
@@ -316,10 +426,10 @@ static void test_health(void)
 	begin(&j, &sink);
 	reply_health(&sink, &st, &info, 10500);
 	end(&j);
-	assert(strstr(j.text, "\"atPort\":{\"port\":\"\",\"usbInterface\":2,\"responding\":false,\"lastReplyAgoSec\":null}"));
+	assert(strstr(j.text, "\"atPort\":{\"port\":\"\",\"usbInterface\":2,\"responding\":false,\"lastReplyAgoSec\":null,\"portOwner\":\"free\"}"));
 	assert(strstr(j.text, "\"audioSlave\":true"));
 	assert(strstr(j.text, "\"bridge\":{\"running\":true,\"frames\":5000000000,\"resyncs\":3,\"txSkipped\":2,\"maxGapUs\":1400}"));
-	assert(strstr(j.text, "\"machine\":{\"greetingLoaded\":true,\"greetingMs\":4250,\"delaySec\":10}"));
+	assert(strstr(j.text, "\"machine\":{\"greetingLoaded\":true,\"greetingMs\":4250,\"greetingError\":\"\",\"delaySec\":10}"));
 	assert(strstr(j.text, "\"recordings\":{\"path\":\"/mnt/sda1/awvoice\",\"ready\":true,\"freeMb\":1234,\"error\":null}"));
 	assert(strstr(j.text, "\"messages\":{\"path\":\"/etc/awvoice/messages\",\"ready\":false,\"freeMb\":null,\"error\":\"No such file or directory\"}"));
 
@@ -330,12 +440,88 @@ static void test_health(void)
 	end(&j);
 	assert(strstr(j.text, "\"error\":\"the drive is not mounted\"}"));
 
+	/* the SIP mode waits on another owner: the words the page shows, and the front end that holds a binding */
+	info.sip_mode = "interop";
+	info.sip_object_owner = "voipd";
+	info.sip_port_owner = "busy";
+	info.sip_last_refusal = "refused-port";
+	info.sip_consumer_pid = 1234;
+	begin(&j, &sink);
+	reply_health(&sink, &st, &info, 10500);
+	end(&j);
+	assert(strstr(j.text, "\"portOwner\":\"busy\"}"));
+	info.sip_web_port = 7443;
+	info.sip_web_addr = "router.lan";
+	begin(&j, &sink);
+	reply_health(&sink, &st, &info, 10500);
+	assert(strstr(j.text, "\"web\":{\"mode\":\"interop\",\"audio\":\"off\",\"port\":7443,\"address\":\"router.lan\"}"));
+	assert(strstr(j.text, "\"sip\":{\"objectOwner\":\"voipd\",\"lastRefusal\":\"refused-port\",\"consumerPid\":1234}"));
+
 	/* the line out of service */
 	info.line_in_service = 0;
 	begin(&j, &sink);
 	reply_health(&sink, &st, &info, 10500);
 	end(&j);
 	assert(strstr(j.text, "\"state\":\"down\",\"calibrated\":false"));
+}
+
+/*
+ * The greeting's words, one per state the file can be in. The health reply and the upload refusals read them from this
+ * one table, so the page learns a vocabulary that cannot drift from the daemon's: every errno machine.c and the staging
+ * can hand back is named here, and an unforeseen one still gets a word rather than nothing.
+ */
+static void test_greeting_words(void)
+{
+	assert(!strcmp(reply_greeting_word(0), ""));			/* the file is good: there is nothing to say */
+	assert(!strcmp(reply_greeting_word(-ENOENT), "MISSING"));
+	assert(!strcmp(reply_greeting_word(-EINVAL), "FORMAT"));
+	assert(!strcmp(reply_greeting_word(-ENODATA), "EMPTY"));
+	assert(!strcmp(reply_greeting_word(-EBADMSG), "TRUNCATED"));
+	assert(!strcmp(reply_greeting_word(-EFBIG), "TOO_BIG"));
+	assert(!strcmp(reply_greeting_word(-ENOMEM), "MEMORY"));
+	assert(!strcmp(reply_greeting_word(-ELOOP), "SYMLINK"));
+	assert(!strcmp(reply_greeting_word(-EBUSY), "BUSY"));
+	assert(!strcmp(reply_greeting_word(-EPROTO), "OFFSET"));
+	assert(!strcmp(reply_greeting_word(-EIO), "IO"));
+	/* what a file can be that is not a file, or is there but not there to read: one word, because the user's action is
+	 * the same either way - look at the file */
+	assert(!strcmp(reply_greeting_word(-EACCES), "UNREADABLE"));
+	assert(!strcmp(reply_greeting_word(-EISDIR), "UNREADABLE"));
+	assert(!strcmp(reply_greeting_word(-EOPNOTSUPP), "UNREADABLE"));
+	assert(!strcmp(reply_greeting_word(-ENXIO), "UNREADABLE"));
+	assert(!strcmp(reply_greeting_word(-ENAMETOOLONG), "UNREADABLE"));
+}
+
+/* a greeting the daemon could not use: the reply says so with its own word, whatever the switch says */
+static void test_health_greeting_refused(void)
+{
+	struct jtext j;
+	struct reply_sink sink;
+	struct phone_status st = blank();
+	struct reply_info info = running;
+
+	/* no machine wired at all is not "a missing greeting": the page must not be told the file is absent */
+	begin(&j, &sink);
+	info.machine_greeting = 0;
+	info.machine_greeting_ms = 0;
+	info.machine_greeting_err = "";
+	reply_health(&sink, &st, &info, 10500);
+	end(&j);
+	assert(strstr(j.text, "\"greetingLoaded\":false,\"greetingMs\":0,\"greetingError\":\"\""));
+
+	/* the file is there and it is not audio the machine can play */
+	begin(&j, &sink);
+	info.machine_greeting_err = reply_greeting_word(-EBADMSG);
+	reply_health(&sink, &st, &info, 10500);
+	end(&j);
+	assert(strstr(j.text, "\"greetingLoaded\":false,\"greetingMs\":0,\"greetingError\":\"TRUNCATED\""));
+
+	/* and one that is simply not there, which is what a fresh router with nothing recorded says */
+	begin(&j, &sink);
+	info.machine_greeting_err = reply_greeting_word(-ENOENT);
+	reply_health(&sink, &st, &info, 10500);
+	end(&j);
+	assert(strstr(j.text, "\"greetingError\":\"MISSING\""));
 }
 
 static void test_events(void)
@@ -380,7 +566,7 @@ static void test_calls(void)
 	struct jtext j;
 	struct reply_sink sink;
 	struct calllog *l = calloc(1, sizeof(*l));
-	struct phone_call_record a = { .id = 1, .dir = PHONE_DIR_IN, .number = "5551", .answered_ms = 1000, .end_ms = 66000, .result = PHONE_RES_ANSWERED };
+	struct phone_call_record a = { .id = 1, .dir = PHONE_DIR_IN, .number = "5551", .answered_ms = 1000, .end_ms = 66000, .result = PHONE_RES_ANSWERED, .answered_by = PHONE_ANSWERED_MACHINE };
 	struct phone_call_record o = { .id = 2, .dir = PHONE_DIR_OUT, .number = "45", .end_ms = 9000, .cause = 17, .result = PHONE_RES_BUSY };
 
 	struct phonebook pb;
@@ -395,11 +581,11 @@ static void test_calls(void)
 	calllog_add(l, &o, 1700000100, NULL, NULL);
 	begin(&j, &sink);
 	reply_calls(&sink, l, NULL);
-	assert(!strcmp(end(&j), "{\"calls\":[{\"id\":2,\"type\":\"OUT\",\"number\":\"45\",\"name\":\"\",\"ts\":1700000100,\"durationSec\":0,\"recording\":\"\",\"message\":\"\",\"result\":\"busy\",\"cause\":17},"
-		"{\"id\":1,\"type\":\"IN\",\"number\":\"5551\",\"name\":\"\",\"ts\":1700000000,\"durationSec\":65,\"recording\":\"\",\"message\":\"1700000000-1.wav\",\"result\":\"answered\",\"cause\":0}]}"));
+	assert(!strcmp(end(&j), "{\"calls\":[{\"id\":2,\"type\":\"OUT\",\"number\":\"45\",\"name\":\"\",\"ts\":1700000100,\"durationSec\":0,\"recording\":\"\",\"message\":\"\",\"answeredBy\":\"none\",\"result\":\"busy\",\"cause\":17},"
+		"{\"id\":1,\"type\":\"IN\",\"number\":\"5551\",\"name\":\"\",\"ts\":1700000000,\"durationSec\":65,\"recording\":\"\",\"message\":\"1700000000-1.wav\",\"answeredBy\":\"machine\",\"result\":\"answered\",\"cause\":0}]}"));
 	/* with a phone book the record carries the contact's name */
 	phonebook_clear(&pb, NULL);
-	assert(!phonebook_add(&pb, "Ann", nums, 1, NULL, stderr));
+	assert(!phonebook_add(&pb, "Ann", nums, 1, NULL, 0, stderr));
 	begin(&j, &sink);
 	reply_calls(&sink, l, &pb);
 	assert(strstr(end(&j), "\"number\":\"5551\",\"name\":\"Ann\"") && strstr(end(&j), "\"number\":\"45\",\"name\":\"\""));
@@ -411,7 +597,7 @@ static void test_clir_readback(void)
 	struct jtext j;
 	struct phone_status st = blank();
 
-	assert(strstr(status_json_health(&j, &st), "\"audioSlave\":null,\"hdVoice\":\"off\",\"callWaiting\":null,\"clir\":null,\"clirStatus\":null"));
+	assert(strstr(status_json_health(&j, &st), "\"audioSlave\":null,\"hdVoice\":\"off\",\"audioRate\":null,\"voiceLayout\":8000,\"callWaiting\":null,\"clir\":null,\"clirStatus\":null"));
 	st.clir = 1;
 	st.clir_status = 4;
 	assert(strstr(status_json_health(&j, &st), "\"clir\":\"hide\",\"clirStatus\":\"allowed\""));
@@ -594,6 +780,8 @@ int main(void)
 	test_status_call_and_elapsed();
 	test_status_modem_fields();
 	test_health();
+	test_health_greeting_refused();
+	test_greeting_words();
 	test_events();
 	test_calls();
 	test_forwarding_reply();

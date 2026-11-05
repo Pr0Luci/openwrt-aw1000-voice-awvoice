@@ -397,8 +397,8 @@ int release_line(struct chip *c, unsigned int ch, int err, FILE *log)
 
 
 /*
- * One channel's voice path: the chip's own dialing controls stay off (we dial with AT commands), one enhancement bit
- * the voice path does not want is cleared, and the codec comes up with its samples at our frame bit positions; every write is read back.
+ * One channel's voice path: the chip's own dialing controls stay off (dialling goes over AT commands), one enhancement bit
+ * the voice path does not want is cleared, and the codec comes up with its samples at the router's frame bit positions; every write is read back.
  */
 int voice_up(struct chip *c, const struct board *board, unsigned int ch, FILE *log)
 {

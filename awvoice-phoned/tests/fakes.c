@@ -15,7 +15,20 @@ static void record(struct model *m, char kind, unsigned int ch, unsigned int add
 		m->log[m->log_count].value = value;
 		m->log[m->log_count].at = m->vtime_ms;
 		m->log_count++;
+	} else {
+		m->log_dropped++;		/* the timeline a test reads is incomplete: the count says so */
 	}
+}
+
+/*
+ * The chip's own ring trip: the ring trip circuit fires on the ring current, the line feed reads forward active
+ * (the chip left the ringing state) and the ring-trip bit reads set. It is time based from the last ring write, so
+ * a test can reproduce a trip that is not a lift.
+ */
+static int ring_tripped(struct model *m, unsigned int ch)
+{
+	return m->ring_trip_ms && (m->reg[ch][REG_LINEFEED] & LF_STATE_MASK) == LF_CODE_RING &&
+	       m->vtime_ms - m->ring_at_ms >= (unsigned long)m->ring_trip_ms;
 }
 
 static int model_frame(void *ctx, const uint8_t tx[4], uint8_t rx[4])
@@ -37,8 +50,14 @@ static int model_frame(void *ctx, const uint8_t tx[4], uint8_t rx[4])
 			rx[2] = m->id;
 		else if (reg == REG_MSTRSTAT)
 			rx[2] = m->mstrstat;
-		else if (reg == REG_LINEFEED && m->lf_read_value >= 0)
-			rx[2] = (uint8_t)m->lf_read_value;
+		else if (reg == REG_LINEFEED) {
+			if (ring_tripped(m, ch))
+				rx[2] = LF_CODE_FWD_ACTIVE;		/* the chip left the ringing state: its ring trip fired */
+			else if (m->lf_read_value >= 0)
+				rx[2] = (uint8_t)m->lf_read_value;
+			else
+				rx[2] = m->reg[ch][reg];
+		}
 		else if (reg == REG_LCRRTP) {
 			/* the script runs on the model's own clock: one entry per LCR_SCRIPT_MS of paused time */
 			unsigned long at;
@@ -52,6 +71,8 @@ static int model_frame(void *ctx, const uint8_t tx[4], uint8_t rx[4])
 			rx[2] = m->lcr_count
 				? m->lcr_bits[at < m->lcr_count ? at : m->lcr_count - 1]
 				: m->reg[ch][reg];			/* a static register value when there is no script */
+			if (ring_tripped(m, ch))
+				rx[2] |= LCR_RTP;			/* the chip's ring trip fired: the pending bit reads set */
 			if (m->lcr_reads && (rx[2] & LCR_ON_HOOK) != (unsigned int)m->lcr_prev)
 				m->flag_set = 1;		/* the chip latches every change of its hook state */
 			m->lcr_prev = rx[2] & LCR_ON_HOOK;
@@ -80,6 +101,13 @@ static int model_frame(void *ctx, const uint8_t tx[4], uint8_t rx[4])
 				rx[2] |= LCR_IRQ_BIT;
 				m->flag_set = 0;		/* reading clears the flag */
 			}
+		} else if (reg == REG_IRQ1) {
+			/* the byte went out on the line: the buffer is free again a byte time after it went in */
+			if (m->room_pending[ch] && m->vtime_ms >= m->room_due_ms[ch]) {
+				m->reg[ch][REG_IRQ1] |= IRQ1_FSK_ROOM;
+				m->room_pending[ch] = 0;
+			}
+			rx[2] = m->reg[ch][reg];
 		} else if (reg == REG_CALR3) {
 			m->cal_reads++;
 			if (m->cal_stuck || m->cal_pending[ch]) {
@@ -110,12 +138,21 @@ static int model_frame(void *ctx, const uint8_t tx[4], uint8_t rx[4])
 		return 0;
 	}
 	m->reg[ch][reg] = tx[2];
+	if (reg == REG_LINEFEED && (tx[2] & LF_STATE_MASK) == LF_CODE_RING)
+		m->ring_at_ms = m->vtime_ms;		/* the trip time of a scripted ring counts from this write */
 	/* the enabled buffer takes a byte only from on-hook transmission (or while ringing); a plain forward active
 	 * on-hook line never raised the room flag on the line */
 	if (reg == REG_FSKDAT && (m->reg[ch][REG_IRQEN1] & IRQEN1_FSK_ROOM) &&
 	    ((m->reg[ch][REG_LINEFEED] & LF_STATE_MASK) == LF_CODE_FWD_OHT ||
-	     (m->reg[ch][REG_LINEFEED] & LF_STATE_MASK) == LF_CODE_RING))
-		m->reg[ch][REG_IRQ1] |= IRQ1_FSK_ROOM;		/* the buffer took the byte: room for the next one */
+	     (m->reg[ch][REG_LINEFEED] & LF_STATE_MASK) == LF_CODE_RING)) {
+		if (m->fsk_room_ms) {
+			m->reg[ch][REG_IRQ1] &= (uint8_t)~IRQ1_FSK_ROOM;	/* the buffer is full until the byte is off the line */
+			m->room_pending[ch] = 1;
+			m->room_due_ms[ch] = m->vtime_ms + m->fsk_room_ms;
+		} else {
+			m->reg[ch][REG_IRQ1] |= IRQ1_FSK_ROOM;		/* the buffer took the byte: room for the next one */
+		}
+	}
 	if (reg == REG_IRQ1)
 		m->reg[ch][REG_IRQ1] &= (uint8_t)~tx[2];	/* a written-back flag clears */
 	if (reg == REG_CALR3 && (tx[2] & CAL_BUSY))
@@ -312,7 +349,7 @@ size_t make_linefeed_board(uint8_t *out, const struct test_board *t)
 		}
 		v = 0x1fffffffu;				/* above the general section's battery rail: clamped */
 		memcpy(out + n + 20 + RING_VBATR_OFFSET, &v, 4);
-		out[n + 20 + RING_TIMER_BYTES_OFFSET] = 0x11;	/* the preset's own timers are replaced by ours */
+		out[n + 20 + RING_TIMER_BYTES_OFFSET] = 0x11;	/* the preset's own timers are replaced by the daemon's */
 		out[n + 20 + RING_CON_OFFSET] = 0x98;
 		out[n + 20 + RING_USERSTAT_OFFSET] = 0x07;
 		n += 20 + RING_PRESET_COUNT * RING_PRESET_SIZE;
@@ -391,6 +428,8 @@ int fm_pump(void *ctx, int *result)
 		f->left--;
 		return 0;
 	}
+	if (f->kind == CALL_REQ_CAUSE && f->cause_stall)
+		return 0;		/* the modem never answers AT+CEER */
 	f->open = 0;
 	if (f->kind == CALL_REQ_STATE && f->state_timeout)
 		*result = -ETIMEDOUT;

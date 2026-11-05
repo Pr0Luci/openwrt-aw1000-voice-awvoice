@@ -29,6 +29,8 @@ struct reply_storage {
 	unsigned long long free_mb;		/* the room left on its filesystem (0 when not ready) */
 };
 
+struct dnd;		/* the quiet hours as the daemon holds them (dnd.h); the reply reads them, writes nothing */
+
 /* what the replies need besides the core's status: facts of the daemon itself */
 struct reply_info {
 	int line_in_service;			/* 0: the core is not running (status then says "down") */
@@ -42,15 +44,27 @@ struct reply_info {
 	unsigned int bridge_running, bridge_resyncs, bridge_tx_skipped, bridge_max_gap_us;
 	const struct indicator *ind;		/* the phone LED's state (NULL: none yet) */
 	int hd;					/* the HD voice state: 0 off, 1 wanted but the modem not switched yet, 2 on */
+	int layout;				/* the audio layout the line was brought up with: 0 = 8 kHz, 1 = 16 kHz */
+	const char *region;			/* the numbering plan in force, as the number table names it (numbers.h); NULL = not chosen yet */
 	const char *const *leds;		/* the router's LED names for the page's selector */
 	int nleds;				/* the count, or a negative errno from the scan */
-	int machine_greeting;			/* a greeting is loaded: the answering machine may answer */
+	int machine_greeting;			/* the daemon holds a usable greeting, whatever the settings ask (the machine answers when both hold) */
 	unsigned int machine_greeting_ms;	/* its length, milliseconds (0 without a greeting) */
+	const char *machine_greeting_err;	/* the one word for why there is none: reply_greeting_word(), "" when one is loaded */
 	unsigned int machine_delay_s;		/* the wait before the machine answers */
 	const char *record_path;		/* the recordings folder ("" when none is configured) */
 	const char *message_path;		/* the answering machine's messages folder */
 	struct reply_storage record_store;	/* the recordings folder's last check */
 	struct reply_storage message_store;	/* the messages folder's last check */
+	const char *sip_mode;			/* awvoice.sip.mode: web, interop or baresip */
+	const char *sip_object_owner;		/* health sip.objectOwner: awvoice, voipd, none */
+	const char *sip_port_owner;		/* health atPort.portOwner: free, busy */
+	const char *sip_last_refusal;		/* the last refusal word the object logged ("" = none) */
+	unsigned int sip_consumer_pid;		/* the front end that attached a media binding (0 = none) */
+	const char *sip_web_audio;		/* health web.audio: off, waiting, listening, connected, or why not */
+	unsigned int sip_web_port;		/* health web.port: the browser-audio listener's port */
+	const char *sip_web_addr;		/* health web.address: the address it is bound to ("" = not listening) */
+	const struct dnd *dnd;			/* the quiet hours the daemon read and the ask the line carries (NULL: none read at all) */
 };
 
 /* the status.state word of a line state: idle, offhook, ring, call, noservice (api.h) */
@@ -59,7 +73,7 @@ const char *reply_state_name(enum phone_line line);
 /* the call phase word of the modem's view of a call: ringing, dialing, alerting, active ("ended" for the event only) */
 const char *reply_phase_name(enum call_state call, enum phone_dir dir, int answered);
 
-/* the status reply (DESIGN of the phone page, data contract v2); `now_ms` is the core's clock */
+/* the status reply (the shapes api.h states); `now_ms` is the core's clock */
 void reply_status(const struct reply_sink *out, const struct phone_status *st, const struct reply_info *info, unsigned long long now_ms);
 
 /* the health reply without the log tail (the page's provider reads that itself) */
@@ -82,5 +96,9 @@ void reply_line_test(const struct reply_sink *out, const struct phone_line_test_
 
 /* the refusal word of a method that could not act (NULL = it acted) */
 const char *reply_refusal(int err, int off_hook);
+
+/* the one word a greeting's state goes by, on the health reply and on the upload methods' refusals: "" when there is
+ * nothing to say about the file (reply_greeting_word maps the errnos machine.h hands back) */
+const char *reply_greeting_word(int err);
 
 #endif /* AW_PHONED_REPLY_H */

@@ -62,12 +62,63 @@ int main(void)
 	modemq_network("+QNWINFO: \"FDD LTE\",\"41302\",\"A VERY LONG BAND TEXT THAT DOES NOT FIT\",1\r\n", net, sizeof(net), band, 8);
 	assert(!strcmp(net, "4G") && !band[0]);		/* too long for the caller's buffer: dropped, not cut */
 
+	/* the network the line is camped on: three digits of the operator, from either reply that carries it */
+	{
+		char mcc[MQ_MCC_MAX], name[MQ_NETWORK_MAX];
+
+		assert(modemq_operator("AT+COPS?\r\r\n+COPS: 0,0,\"41301\",7\r\n\r\nOK\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 1);
+		assert(!strcmp(mcc, "413") && !name[0]);
+		assert(modemq_operator("+COPS: 0,0,\"413020\",7\r\nOK\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 1);
+		assert(!strcmp(mcc, "413"));					/* a three-digit network code */
+		assert(modemq_operator("+COPS: 0,0,41301,7\r\nOK\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 1);
+		assert(!strcmp(mcc, "413"));					/* the same digits unquoted, as some modems print them */
+		assert(modemq_operator("+COPS: 2,0,\"23410\",10\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 1);
+		assert(!strcmp(mcc, "234"));					/* the preferred operator of another country */
+		/* a name printed as text: no code to read, and the caller is given the modem's own word to say it with */
+		assert(modemq_operator("+COPS: 0,2,\"Dialog Dialog\",7\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 0);
+		assert(!mcc[0] && !strcmp(name, "Dialog Dialog"));
+		assert(modemq_operator("+COPS: 0,3,\"SL-Mobitel\",7\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 0);
+		assert(!mcc[0] && !strcmp(name, "SL-Mobitel"));
+		assert(modemq_operator("+COPS: 0,0,\"4130\",7\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 0);	/* four digits are not MCC+MNC */
+		assert(!strcmp(name, "4130"));
+		assert(modemq_operator("+COPS: 0,0,\"4130123\",7\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 0);
+		assert(modemq_operator("+COPS: 0,0,\"41x01\",7\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 0);
+		assert(modemq_operator("+COPS: 0,0,\"\",7\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 0);
+		/* nothing to read: the reply names no operator, has no such field, or is not an answer at all */
+		assert(modemq_operator("+COPS: 0\r\nOK\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == -1);
+		assert(modemq_operator("+COPS: 2\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == -1);
+		assert(modemq_operator("ERROR\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == -1);
+		assert(modemq_operator("", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == -1);
+		assert(modemq_operator("+COPS: 0,0,\"41301\",7\r\n", "+COPS:", 3, mcc, sizeof(mcc), name, sizeof(name)) == 0);	/* the technology field is not a network */
+		assert(modemq_operator("+COPS: 0,0\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == -1);		/* the reply stops before the operator field */
+		assert(modemq_operator("+COPS: 0,0,\"41301\",7\r\n", "+COPS:", 2, mcc, 3, name, sizeof(name)) == -1);	/* too little room for a code */
+		assert(modemq_operator("+COPS: 0,0,\"41301\",7\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, 0) == 1);	/* no room asked for the name: the digits still come */
+		assert(!strcmp(mcc, "413"));
+		/* the modem's own query carries the same PLMN, second in its list — what this board reads its network from */
+		assert(modemq_operator("+QNWINFO: \"FDD LTE\",\"41302\",\"LTE BAND 3\",1725\r\n", "+QNWINFO:", 1, mcc, sizeof(mcc), NULL, 0) == 1);
+		assert(!strcmp(mcc, "413"));
+		assert(modemq_operator("+QNWINFO: \"FDD LTE\",\"413026\",\"LTE BAND 3\",1725\r\n", "+QNWINFO:", 1, mcc, sizeof(mcc), NULL, 0) == 1);
+		assert(!strcmp(mcc, "413"));
+		assert(modemq_operator("+QNWINFO: \"No Service\"\r\nOK\r\n", "+QNWINFO:", 1, mcc, sizeof(mcc), name, sizeof(name)) == -1);
+		assert(modemq_operator("+QNWINFO: \"FDD LTE\",\"Sri Lanka-Mobile\",\"LTE BAND 3\",1725\r\n", "+QNWINFO:", 1, mcc, sizeof(mcc), name, sizeof(name)) == 0);
+		assert(!strcmp(name, "Sri Lanka-Mobile"));
+	}
+
 	/* PCM mode: the second field, whatever the first prints */
 	assert(modemq_audio_slave("AT+QDAI?\r\r\n+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n") == 1);
 	assert(modemq_audio_slave("+QDAI: 1,0,0,4,0,0,1,1\r\nOK\r\n") == 0);
 	assert(modemq_audio_slave("+QDAI: 1,3,0,4\r\n") == MQ_UNKNOWN);
 	assert(modemq_audio_slave("+QDAI: 1\r\n") == MQ_UNKNOWN);
 	assert(modemq_audio_slave("ERROR\r\n") == MQ_UNKNOWN);
+
+	/* the PCM sample rate: the sixth field, the only word from the modem on whether the wire is really 16 kHz */
+	assert(modemq_audio_rate("AT+QDAI?\r\r\n+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n") == 0);	/* the router's factory answer */
+	assert(modemq_audio_rate("+QDAI: x,1,0,4,0,1,1,1\r\nOK\r\n") == 1);
+	assert(modemq_audio_rate("+QDAI: 1,0,0,4,0,1,1,1\r\nOK\r\n") == 1);			/* whatever the first field prints */
+	assert(modemq_audio_rate("+QDAI: x,1,0,4,0,2,1,1\r\nOK\r\n") == MQ_UNKNOWN);		/* a rate no bridge here can serve */
+	assert(modemq_audio_rate("+QDAI: x,1,0,4\r\n") == MQ_UNKNOWN);				/* the field is not there */
+	assert(modemq_audio_rate("+QDAI: x,1,0,4,0\r\n") == MQ_UNKNOWN);
+	assert(modemq_audio_rate("ERROR\r\n") == MQ_UNKNOWN);
 
 	/* the range of a setting from its test command */
 	{
@@ -102,6 +153,6 @@ int main(void)
 		assert(modemq_clir("+CLIR: 1,1\r\n", NULL) == 1);
 	}
 
-	assert(modemq_count == 8 && !strcmp(modemq_command[0], "AT+QDAI?") && !strcmp(modemq_command[1], "AT+CLVL=?") && !strcmp(modemq_command[6], "AT+QNWINFO") && !strcmp(modemq_command[7], "AT+CLIR?"));
+	assert(modemq_count == 9 && !strcmp(modemq_command[0], "AT+QDAI?") && !strcmp(modemq_command[1], "AT+CLVL=?") && !strcmp(modemq_command[6], "AT+QNWINFO") && !strcmp(modemq_command[7], "AT+CLIR?") && !strcmp(modemq_command[8], "AT+COPS?"));
 	return puts("modemq: all tests passed") < 0;
 }

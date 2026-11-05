@@ -1,0 +1,186 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 Pr0Luci
+#
+# awvoice-provision: the one-time account file a softphone reads after scanning a code.
+#
+# A scanned code carries Linphone a URL and nothing else: the phone fetches that URL and applies the
+# lpconfig XML it returns, so the account - and its password - lives in the file, not in the code.
+# That is why the file is written under a name nobody can guess, lives for minutes, and is written only
+# when the page asks. The web server serves it without a session, because the phone has none.
+#
+# build  --user U --passwd P --host H --port N --realm R [--out DIR] [--path PFX] [--webport N]
+#                                   [--token T] [--now E] [--ttl S]
+# --port is where the phone sends its SIP; --webport is where this router serves the file the phone
+# fetches first. They are different numbers and the code carries only the second.
+# prune  --out DIR [--now E] [--ttl S]
+#
+# build prints one line of JSON: {"ok":true,"file":...,"url":...,"expires":...} or
+# {"ok":false,"reason":"..."}.
+
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+OUT=/www/awvoice-provision
+PATH_PFX=
+TTL=600
+USER=
+PASSWD=
+HOST=
+PORT=
+WEBPORT=8080
+REALM=
+TOKEN=
+NOW=
+
+die() {
+	printf '{"ok":false,"reason":"%s"}\n' "$1"
+	exit 1
+}
+
+# an XML text node: the five entities, and nothing else may survive
+xml_esc() {
+	sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
+json_esc() {
+	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/    /g'
+}
+
+new_token() {
+	# od is not in this build's busybox; hexdump is, and one byte at a time in hex is what a name needs
+	hexdump -e '/1 "%02x"' -n 16 /dev/urandom 2>/dev/null | tr -d ' \t\n' | head -c 32
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	build|prune) MODE=$1 ;;
+	--user)		USER=$2; shift ;;
+	--passwd)	PASSWD=$2; shift ;;
+	--host)		HOST=$2; shift ;;
+	--port)		PORT=$2; shift ;;
+	--webport)	WEBPORT=$2; shift ;;
+	--realm)	REALM=$2; shift ;;
+	--out)		OUT=$2; shift ;;
+	--path)		PATH_PFX=$2; shift ;;
+	--token)	TOKEN=$2; shift ;;
+	--now)		NOW=$2; shift ;;
+	--ttl)		TTL=$2; shift ;;
+	--*) die BAD_ARG ;;
+	*) MODE=$1 ;;					# a bare word is the command; the check below refuses what it is not
+	esac
+	shift
+done
+
+case "$MODE" in
+build|prune) ;;
+*) die NO_COMMAND ;;
+esac
+
+case "$TTL" in
+''|*[!0-9]*) die BAD_TTL ;;
+esac
+[ "$TTL" -ge 60 ] || die TTL_SHORT			# a code is scanned by a human, not by a script
+[ "$TTL" -le 3600 ] || die TTL_LONG
+
+[ -n "$NOW" ] || NOW=$(date +%s)
+case "$NOW" in
+''|*[!0-9]*) die BAD_NOW ;;
+esac
+
+# pruning is part of every run: a stale file is a credential left on a server
+prune_old() {
+	[ -d "$OUT" ] || return 0
+	# minutes, rounded up: find's clock is coarser than the shell's
+	mins=$(( (TTL + 59) / 60 ))
+	find "$OUT" -maxdepth 1 -type f -name 'awvoice-*.xml' -mmin +"$mins" -exec rm -f {} \; 2>/dev/null
+	find "$OUT" -maxdepth 1 -type f -name 'awvoice-*.xml.tmp' -mmin +"$mins" -exec rm -f {} \; 2>/dev/null
+}
+
+prune_old
+[ "$MODE" = prune ] && { printf '{"ok":true}\n'; exit 0; }
+
+case "$USER" in
+''|*[!A-Za-z0-9._%+@-]*) die BAD_USER ;;
+esac
+[ "${#USER}" -le 64 ] || die BAD_USER
+case "$REALM" in
+''|*[!A-Za-z0-9.-]*) die BAD_REALM ;;
+esac
+case "$HOST" in
+''|*[!A-Za-z0-9.-]*) die BAD_HOST ;;
+esac
+case "$PORT" in
+''|*[!0-9]*) die BAD_PORT ;;
+esac
+[ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die BAD_PORT
+case "$WEBPORT" in
+''|*[!0-9]*) die BAD_PORT ;;
+esac
+[ "$WEBPORT" -ge 1 ] && [ "$WEBPORT" -le 65535 ] || die BAD_PORT
+# a password is copied into an XML node and a phone must be able to hold it: printable characters only,
+# no space, and the length the installed service's own validator accepts
+case "$PASSWD" in
+''|*[![:print:]]*) die BAD_PASSWD ;;
+esac
+printf '%s' "$PASSWD" | tr -d ' \t' | grep -qxF -e "$PASSWD" || die BAD_PASSWD
+PLEN=$(printf '%s' "$PASSWD" | wc -c | tr -d ' ')
+[ "$PLEN" -ge 8 ] || die PASSWD_SHORT
+[ "$PLEN" -le 127 ] || die PASSWD_LONG
+
+[ -d "$OUT" ] || mkdir -p "$OUT" 2>/dev/null || die NO_DIR
+[ -w "$OUT" ] || die NO_DIR
+
+if [ -n "$TOKEN" ]; then
+	case "$TOKEN" in
+	*[!0-9a-f]*) die BAD_TOKEN ;;
+	esac
+	[ "${#TOKEN}" -eq 32 ] || die BAD_TOKEN
+else
+	TOKEN=$(new_token)
+	case "$TOKEN" in
+	*[!0-9a-f]*|'') die NO_RANDOM ;;
+	esac
+fi
+
+FILE=$OUT/awvoice-$TOKEN.xml
+URL=http://$HOST:$WEBPORT$PATH_PFX/awvoice-$TOKEN.xml
+EXPIRES=$((NOW + TTL))
+# the code is read by a phone's decoder that stops at 254 bytes, so a long address is a hard refusal
+[ "${#URL}" -le 254 ] || die URL_LONG
+
+ESC_USER=$(printf '%s' "$USER" | xml_esc)
+ESC_PASSWD=$(printf '%s' "$PASSWD" | xml_esc)
+ESC_HOST=$(printf '%s' "$HOST" | xml_esc)
+ESC_REALM=$(printf '%s' "$REALM" | xml_esc)
+
+# written beside the target and moved in place: a half-written file is a credential the phone cannot read
+TMP=$FILE.tmp
+{
+	printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+	printf '<config xmlns="http://www.linphone.org/xsds/lpconfig.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.linphone.org/xsds/lpconfig.xsd lpconfig.xsd">\n'
+	printf '  <section name="auth_info_0">\n'
+	printf '    <entry name="username" overwrite="true">%s</entry>\n' "$ESC_USER"
+	printf '    <entry name="userid" overwrite="true">%s</entry>\n' "$ESC_USER"
+	printf '    <entry name="passwd" overwrite="true">%s</entry>\n' "$ESC_PASSWD"
+	printf '    <entry name="realm" overwrite="true">%s</entry>\n' "$ESC_REALM"
+	printf '  </section>\n'
+	printf '  <section name="proxy_0">\n'
+	printf '    <entry name="reg_proxy" overwrite="true">sip:%s:%s;transport=udp</entry>\n' "$ESC_HOST" "$PORT"
+	printf '    <entry name="reg_identity" overwrite="true">sip:%s@%s:%s</entry>\n' "$ESC_USER" "$ESC_HOST" "$PORT"
+	printf '    <entry name="reg_expires" overwrite="true">300</entry>\n'
+	printf '    <entry name="reg_sendregister" overwrite="true">1</entry>\n'
+	printf '    <entry name="publish" overwrite="true">0</entry>\n'
+	printf '    <entry name="dial_escape_plus" overwrite="true">0</entry>\n'
+	printf '  </section>\n'
+	printf '  <section name="sip">\n'
+	printf '    <entry name="default_proxy" overwrite="true">0</entry>\n'
+	printf '  </section>\n'
+	printf '</config>\n'
+} > "$TMP" 2>/dev/null || { rm -f "$TMP"; die WRITE_FAILED; }
+
+chmod 644 "$TMP" 2>/dev/null
+mv -f "$TMP" "$FILE" 2>/dev/null || { rm -f "$TMP"; die WRITE_FAILED; }
+
+printf '{"ok":true,"file":"%s","url":"%s","expires":%s,"ttl":%s,"username":"%s","realm":"%s"}\n' \
+	"$(printf '%s' "$FILE" | json_esc)" "$(printf '%s' "$URL" | json_esc)" "$EXPIRES" "$TTL" \
+	"$ESC_USER" "$ESC_REALM"

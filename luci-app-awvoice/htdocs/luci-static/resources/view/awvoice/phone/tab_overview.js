@@ -3,13 +3,12 @@
 'use strict';
 'require baseclass';
 'require view.awvoice.phone.tab_calls as calls';
+'require view.awvoice.phone.webphone as webphone';
 
 /*
- * tab_overview.js - Overview tab: the state banner, the live call card, four status tiles, "My number" and the last
- * calls. Redraws on every 'status' / 'calls' event.
- *
- * The call timer counts on from the backend's elapsedSec (seconds since the answer), so a wrong clock in the browser
- * changes nothing. Before the answer there is no timer: the phase is shown instead.
+ * tab_overview.js - Overview tab: the phone itself. The state banner, the four status tiles and the last calls sit
+ * beside the page's own call card and its browser audio (webphone.js), so a call can be taken and spoken here without
+ * opening any other tab. Redraws on every 'status' / 'calls' event.
  *
  * Display choice (the backend supplies the raw value): signal bars from the LTE RSRP in dBm.
  */
@@ -33,32 +32,36 @@ function bars(n) {
 
 return baseclass.extend({
 	render: function(ctx) {
-		var u = ctx.ui, timer = 0, base = 0, since = 0;
+		var u = ctx.ui;
 
 		var banIcon = u.icon('check'), banTitle = E('b'), banSub = E('div', { 'class': 'av-sub' });
-		var ban = E('div', { 'class': 'av-ban', 'role': 'status' }, [ banIcon, E('div', [ banTitle, banSub ]) ]);
-		var mine = E('div', { 'class': 'av-note', 'hidden': true });
+		/* the line's own number rides at the end of the state card - two rows in one column, held to the card's right
+		   edge and read from the left - because a number under the card is a line the eye has to leave the state
+		   for, and the two belong together: the state and the number that state answers to */
+		var numTitle = E('div'), numValue = E('div', { 'class': 'av-mono' });
+		var numCol = E('div', { 'class': 'av-ban-num', 'hidden': true }, [ numTitle, numValue ]);
+		var ban = E('div', { 'class': 'av-ban alert-message', 'role': 'status' }, [ banIcon, E('div', [ banTitle, banSub ]), numCol ]);
 
-		var clock = E('div', { 'class': 'av-big av-mono' });
-		var dirLbl = E('div', { 'class': 'av-mut' });
-		var remote = E('span', { 'class': 'av-r av-mono' });
-		var hang = u.button(_('Hang up'), 'phone-miss', 'cbi-button-remove', function() { hangUp(); });
-		var live = E('div', { 'class': 'cbi-section', 'hidden': true }, [
-			E('h3', [ _('Live call'), remote ]),
-			E('div', { 'class': 'av-g2' }, [ E('div', [ clock, dirLbl ]), E('div', { 'class': 'av-acts' }, hang) ])
-		]);
+		var phone = webphone.render(ctx);
 
 		var tLine = E('b'), tNet = E('b'), tSig = E('b'), tSvc = E('b');
-		function tile(label, b) { return E('div', { 'class': 'av-tile' }, [ E('small', label), b ]); }
+		/* the tile keeps the design it has always had on this page - a quiet label over the state - and takes its
+	   box from the same framework card the rest of the page is built out of, so the theme paints the background,
+	   the border and the radius instead of the page painting one that only matches the theme it was read under */
+		function tile(label, b) { return E('div', { 'class': 'av-tile cbi-section' }, [ E('small', label), b ]); }
 		var tiles = E('div', { 'class': 'av-tiles' }, [
 			tile(_('Line'), tLine), tile(_('Voice network'), tNet), tile(_('Signal'), tSig), tile(_('Service'), tSvc)
 		]);
 
 		var goAll = E('a', { 'href': '#', 'click': function(ev) { ev.preventDefault(); ctx.goto('calls'); } }, _('View all'));
 		var last = E('div');
+
+		var lastCard = E('div', { 'class': 'cbi-section' }, [ E('h3', [ _('Last calls'), E('span', { 'class': 'av-r' }, goAll) ]), last ]);
+
+		/* the phone and the browser audio first; the recent calls sit under the audio, so the line's work is one column */
 		var root = E('div', [
-			ban, mine, live, tiles,
-			E('div', { 'class': 'cbi-section' }, [ E('h3', [ _('Last calls'), E('span', { 'class': 'av-r' }, goAll) ]), last ])
+			ban, tiles,
+			E('div', { 'class': 'av-callgrid' }, [ phone.call, E('div', {}, [ phone.audio, lastCard ]) ])
 		]);
 
 		function dot(cls, text) {
@@ -67,18 +70,6 @@ return baseclass.extend({
 		function fill(node, kids) {
 			node.textContent = '';
 			kids.forEach(function(k) { node.appendChild(k); });
-		}
-
-		function hangUp() {
-			ctx.api.hangup().then(function(r) {
-				ctx.toast(r.ok ? _('Hang-up sent') : _('There is no call to hang up'));
-				return ctx.refresh();
-			}, function(e) { ctx.toast(e.message); });
-		}
-
-		function tick() {
-			if (!root.isConnected && timer) { window.clearInterval(timer); timer = 0; return; }
-			clock.textContent = u.fmtDuration(base + Math.floor((Date.now() - since) / 1000));
 		}
 
 		function lineWord(s) {
@@ -94,18 +85,24 @@ return baseclass.extend({
 			case 'offhook':
 				return [ '', 'phone', _('Handset lifted'), _('The handset is off hook. Dial a number.') ];
 			case 'ring':
-				return [ 'w', 'bell', _('Ringing'), num ? _('Incoming call from %s. Lift the handset to answer.').format(num)
-					: _('Incoming call from a withheld number. Lift the handset to answer.') ];
+				/* quiet hours hold the bell: the network offers the call and a lift answers it, but nothing here makes
+				 * a sound, so the card cannot say the phone is ringing */
+				if (st.quiet === true)
+					return [ '', 'bell', _('Call held quiet'), num ? _('Quiet hours: a call from %s is waiting. Answer on this page, or lift the handset.').format(num)
+						: _('Quiet hours: a call from a withheld number is waiting. Answer on this page, or lift the handset.') ];
+				return [ 'warning', 'bell', _('Ringing'), num ? _('Incoming call from %s. Answer on this page, or lift the handset.').format(num)
+					: _('Incoming call from a withheld number. Answer on this page, or lift the handset.') ];
 			case 'call':
 				if (st.machine === 'answering' || st.machine === 'answered')
 					return [ '', 'message', _('Answering machine'), st.machine === 'answering'
 						? _('The call is being answered; the phone has stopped ringing.')
 						: _('The greeting is played to the caller, then the message is recorded.') ];
-				return [ '', 'phone', _('In call'), c && c.phase !== 'active' ? phaseWord(c) : _('Handset is off hook.') ];
+				return [ '', 'phone', _('In call'), c && c.phase !== 'active' ? phaseWord(c)
+					: st.hook === 'off' ? _('Handset is off hook.') : _('Handset is on hook: the call is on this page.') ];
 			case 'noservice':
-				return [ 'w', 'alert', _('No service'), _('The modem has no mobile service. Calls cannot be made until it returns.') ];
+				return [ 'warning', 'alert', _('No service'), _('The modem has no mobile service. Calls cannot be made until it returns.') ];
 			}
-			return [ 'e', 'alert', _('Phone service is down'), _('The phone service is not running. Open the Health tab to start it.') ];
+			return [ 'error', 'alert', _('Phone service is down'), _('The phone service is not running. Open the Health tab to start it.') ];
 		}
 
 		function phaseWord(c) {
@@ -114,30 +111,14 @@ return baseclass.extend({
 
 		function onStatus(st) {
 			var b = banner(st), c = st.call;
-			ban.className = 'av-ban ' + b[0];
+			ban.className = 'av-ban alert-message' + (b[0] ? ' ' + b[0] : '');
 			banIcon.replaceWith(banIcon = u.icon(b[1]));
 			banTitle.textContent = b[2];
 			banSub.textContent = b[3];
 
-			mine.hidden = !st.myNumber;
-			mine.textContent = st.myNumber ? _('My number: %s').format(st.myNumber) : '';
-
-			live.hidden = !c;
-			if (timer) { window.clearInterval(timer); timer = 0; }
-			if (c) {
-				var name = (c.name || ctx.nameFor(c.number));
-				remote.textContent = name ? name + ' ' + c.number : c.number || _('Withheld');
-				dirLbl.textContent = st.machine === 'answering' || st.machine === 'answered' ? _('Answering machine')
-					: c.direction === 'OUT' ? _('Outgoing') : _('Incoming');
-				if (c.phase === 'active') {
-					base = c.elapsedSec;
-					since = Date.now();
-					tick();
-					timer = window.setInterval(tick, 1000);
-				} else {
-					clock.textContent = phaseWord(c);
-				}
-			}
+			numCol.hidden = !st.myNumber;
+			numTitle.textContent = _('My number');
+			numValue.textContent = st.myNumber || '';
 
 			var down = st.state === 'down', ring = st.state === 'ring', warn = ring || st.state === 'noservice';
 			fill(tLine, dot(down ? 'off' : warn ? 'warn' : '', lineWord(st.state)));

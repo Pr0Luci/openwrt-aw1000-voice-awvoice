@@ -1,9 +1,11 @@
 {
 	"luci-app-awvoice": {
-		"description": "Grant access to the phone page: its settings, the phone service's status and tests",
+		"description": "Grant access to the phone page: its settings, the phone service's status and tests, its own call controls, the installed SIP service's settings, and the one-time account code a softphone scans",
 		"read": {
 			"uci": [
-				"awvoice"
+				"awvoice",
+				"qmodem_sip",
+				"network"
 			],
 			"file": {
 				"/sbin/logread": [
@@ -21,34 +23,72 @@
 					"info"
 				],
 				"awvoice": [
+					"call_status",
 					"calls",
 					"forwarding_get",
+					"greeting_get",
 					"health",
 					"message_get",
 					"messages",
 					"recording_get",
 					"recordings",
 					"status"
+				],
+				"qmodem_voip": [
+					"status"
+				],
+				"qmodem.sip": [
+					"status"
+				],
+				"luci.awvoice": [
+					"sipdiag"
 				]
 			}
 		},
 		"write": {
 			"uci": [
-				"awvoice"
+				"awvoice",
+				"qmodem_sip"
 			],
+			"file": {
+				"/etc/init.d/qmodem_voip_sipd restart": [
+					"exec"
+				],
+				"/etc/init.d/qmodem_voip_sipd start": [
+					"exec"
+				],
+				"/etc/init.d/qmodem_voip_sipd stop": [
+					"exec"
+				]
+			},
 			"ubus": {
 				"awvoice": [
 					"calls_delete",
+					"greeting_abort",
+					"greeting_begin",
+					"greeting_commit",
+					"greeting_put",
 					"hangup",
 					"line_test",
 					"loopback_test",
 					"message_delete",
 					"recording_delete",
 					"reload",
-					"ring_test"
+					"ring_test",
+					"web_answer",
+					"web_audio_open",
+					"web_dtmf",
+					"web_flash",
+					"web_hangup",
+					"web_originate",
+					"web_reject"
 				],
 				"luci.awvoice": [
+					"provision",
 					"service"
+				],
+				"qmodem.sip": [
+					"generate_credentials"
 				]
 			}
 		}

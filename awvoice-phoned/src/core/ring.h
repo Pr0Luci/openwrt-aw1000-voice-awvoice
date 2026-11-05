@@ -9,7 +9,7 @@
 #include "chip.h"
 
 /*
- * Ringing. ring_load writes the ring generator from the board file's preset and our cadence (every word is read
+ * Ringing. ring_load writes the ring generator from the board file's preset and the cadence set here (every word is read
  * back); the caller holds protected mode and the line is fed (forward active). ring_set moves the line between
  * forward active and ringing and reads the state back. Both return 0 or a negative errno.
  */

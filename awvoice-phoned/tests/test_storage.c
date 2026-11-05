@@ -19,7 +19,7 @@ static void test_names(void)
 	unsigned long long epoch = 0, id = 0;
 
 	assert(storage_name_ok("1700000000-1.wav"));
-	assert(storage_name_ok("7-7.wav"));			/* the shortest ours can be */
+	assert(storage_name_ok("7-7.wav"));			/* the shortest this allows */
 	assert(storage_name_ok("0-0.wav"));
 	/* another program's file, or one that never came from the recorder */
 	assert(!storage_name_ok("123.wav"));
@@ -75,7 +75,7 @@ static void test_paths(void)
 	snprintf(p, sizeof(p), "%s", "/mnt/sda1////");
 	assert(storage_path_norm(p, sizeof(p)) == 0 && !strcmp(p, "/mnt/sda1"));
 	snprintf(p, sizeof(p), "%s", "/");
-	assert(storage_path_norm(p, sizeof(p)) == -EINVAL);		/* the root is never a folder of ours */
+	assert(storage_path_norm(p, sizeof(p)) == -EINVAL);		/* the root is never a folder this program uses */
 	snprintf(p, sizeof(p), "%s", "//");
 	assert(storage_path_norm(p, sizeof(p)) == -EINVAL);
 	snprintf(p, sizeof(p), "%s", "mnt/sda1");
@@ -147,7 +147,7 @@ static void test_tmp_clean(const char *root)
 	snprintf(path, sizeof(path), "%s/%s", dir, STORAGE_PROBE);	assert(!close(open(path, O_CREAT | O_WRONLY, 0600)));	/* a killed check's probe */
 	assert(storage_tmp_clean(dir) == 2);			/* the probe goes too, and is not counted as a tmp */
 	assert(access(path, F_OK) == -1);
-	assert(storage_name_ok(".awvoice-probe") == 0);		/* it is litter, never one of our files */
+	assert(storage_name_ok(".awvoice-probe") == 0);		/* it is litter, never one this program writes */
 	snprintf(path, sizeof(path), "%s/1700000002-2.wav", dir);
 	assert(access(path, F_OK) == 0);				/* a finished file is not a tmp */
 	snprintf(path, sizeof(path), "%s/notes.tmp", dir);	assert(access(path, F_OK) == 0);

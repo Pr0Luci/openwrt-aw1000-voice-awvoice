@@ -75,6 +75,37 @@ static unsigned int get_machine_enabled(const struct aw_config *c) { return (uns
 static unsigned int get_machine_delay(const struct aw_config *c) { return c->machine_delay_s; }
 static unsigned int get_machine_max_mb(const struct aw_config *c) { return c->machine_max_mb; }
 static unsigned int get_machine_max_s(const struct aw_config *c) { return c->machine_max_s; }
+static unsigned int get_web_port(const struct aw_config *c) { return c->web_port; }
+
+/* the page's browser audio: a listener port and the router's own HTTPS certificate pair by default */
+static void test_web_options(void)
+{
+	struct aw_config c;
+	FILE *f = log_open();
+
+	config_defaults(&c);
+	assert(c.web_port == 7443);
+	assert(!strcmp(c.web_iface, "lan"));
+	assert(!strcmp(c.web_cert, "/etc/uhttpd.crt"));
+	assert(!strcmp(c.web_key, "/etc/uhttpd.key"));
+	edge("web_port", 1024, 65535, get_web_port);
+	assert(config_set(&c, "web_port", "7443", f) == 0 && c.web_port == 7443);
+	assert(config_set(&c, "web_port", "80", f) == -EINVAL && c.web_port == 7443);	/* a privileged port is not this listener's */
+	assert(config_set(&c, "web_port", "70000", f) == -EINVAL);
+	assert(config_set(&c, "web_iface", "guest", f) == 0 && !strcmp(c.web_iface, "guest"));
+	assert(config_set(&c, "web_iface", "br-lan.2", f) == 0 && !strcmp(c.web_iface, "br-lan.2"));
+	assert(config_set(&c, "web_iface", "", f) == -EINVAL && !strcmp(c.web_iface, "br-lan.2"));
+	assert(config_set(&c, "web_iface", "a b", f) == -EINVAL);			/* a space is no interface */
+	assert(config_set(&c, "web_iface", "lan/../wan", f) == -EINVAL);		/* nor is a path */
+	assert(config_set(&c, "web_iface", "averyveryverylongname", f) == -EINVAL);	/* longer than a kernel name */
+	assert(config_set(&c, "web_cert", "/etc/awvoice/audio.pem", f) == 0 && !strcmp(c.web_cert, "/etc/awvoice/audio.pem"));
+	assert(config_set(&c, "web_cert", "audio.pem", f) == -EINVAL && !strcmp(c.web_cert, "/etc/awvoice/audio.pem"));
+	assert(config_set(&c, "web_key", "/etc/awvoice/audio.key", f) == 0 && !strcmp(c.web_key, "/etc/awvoice/audio.key"));
+	assert(config_set(&c, "web_key", "", f) == -EINVAL && !strcmp(c.web_key, "/etc/awvoice/audio.key"));
+	fclose(f);
+	free(log_buf);
+	log_buf = NULL;
+}
 
 static void test_defaults(void)
 {
@@ -90,7 +121,7 @@ static void test_defaults(void)
 	assert(c.cid_kind == AW_CID_DTMF && !c.cid_prering && c.ringback == AW_RINGBACK_AUTO && c.level_trace == 0);
 	assert(c.earpiece_volume == AW_CONFIG_UNSET && c.modem_rx_gain == AW_CONFIG_UNSET);
 	assert(c.my_number[0] == 0);
-	assert(!strcmp(c.region, "LK"));
+	assert(!strcmp(c.region, "auto"));	/* the plan follows the network unless a name is set */
 	assert(c.clir == 0 && !c.hotline_number[0] && c.hotline_delay_s == 10);
 	assert(c.record_enabled == 0 && c.record_max_mb == 50);
 	assert(!strcmp(c.record_path, "/etc/awvoice/recordings"));
@@ -143,17 +174,16 @@ static void test_recording_options(void)
 	fclose(f);
 }
 
-/* the answering machine is off until it is switched on; the greeting is a file and the messages a directory, so
- * both are absolute paths; the delay counts from the call's first listing and 0 answers at once */
+/* the answering machine is off until it is switched on and the messages go to a directory; the greeting's own path is
+ * not a setting any more, so a stored line is refused rather than followed (machine.h names the one file the page
+ * manages); the delay counts from the call's first listing and 0 answers at once */
 static void test_machine_options(void)
 {
 	struct aw_config c;
-	char longpath[AW_CONFIG_PATH_MAX + 2];
 	FILE *f = log_open();
 
 	config_defaults(&c);
 	assert(c.machine_enabled == 0);
-	assert(!strcmp(c.machine_greeting, "/etc/awvoice/greeting.wav"));
 	assert(c.machine_delay_s == 10);
 	assert(!strcmp(c.machine_path, "/etc/awvoice/messages"));
 	assert(c.machine_max_mb == 50 && c.machine_max_s == 120);
@@ -164,16 +194,11 @@ static void test_machine_options(void)
 	config_defaults(&c);
 	assert(config_set(&c, "machine_enabled", "1", f) == 0 && c.machine_enabled == 1);
 	assert(config_set(&c, "machine_enabled", "2", f) == -EINVAL && c.machine_enabled == 1);
-	assert(config_set(&c, "machine_greeting", "/mnt/usb/hello.wav", f) == 0 && !strcmp(c.machine_greeting, "/mnt/usb/hello.wav"));
-	assert(config_set(&c, "machine_greeting", "hello.wav", f) == -EINVAL && !strcmp(c.machine_greeting, "/mnt/usb/hello.wav"));
-	assert(config_set(&c, "machine_greeting", "", f) == -EINVAL);
-	memset(longpath, 'a', AW_CONFIG_PATH_MAX - 1);
-	longpath[0] = '/';
-	longpath[AW_CONFIG_PATH_MAX - 1] = 0;
-	assert(config_set(&c, "machine_greeting", longpath, f) == 0 && strlen(c.machine_greeting) == AW_CONFIG_PATH_MAX - 1);
-	longpath[AW_CONFIG_PATH_MAX - 1] = 'a';
-	longpath[AW_CONFIG_PATH_MAX] = 0;
-	assert(config_set(&c, "machine_greeting", longpath, f) == -EINVAL);
+	/* a retired option answers -ENOENT, the same as a name the config never had: nothing is stored, nothing is
+	 * refused as if the user had written a broken value, and the log line says where the greeting lives now */
+	assert(config_set(&c, "machine_greeting", "/mnt/usb/hello.wav", f) == -ENOENT);
+	assert(config_set(&c, "machine_greeting", "hello.wav", f) == -ENOENT);
+	assert(config_set(&c, "machine_greeting", "", f) == -ENOENT);
 	assert(config_set(&c, "machine_path", "/mnt/usb/messages", f) == 0 && !strcmp(c.machine_path, "/mnt/usb/messages"));
 	assert(config_set(&c, "machine_path", "messages", f) == -EINVAL && !strcmp(c.machine_path, "/mnt/usb/messages"));
 	assert(config_set(&c, "machine_path", "", f) == -EINVAL);
@@ -279,10 +304,16 @@ static void test_region(void)
 	FILE *f = log_open();
 
 	config_defaults(&c);
+	assert(!strcmp(c.region, "auto"));
 	assert(config_set(&c, "region", "LK", f) == 0 && !strcmp(c.region, "LK"));
-	assert(config_set(&c, "region", "lk", f) == -EINVAL && !strcmp(c.region, "LK"));
+	assert(config_set(&c, "region", "auto", f) == 0 && !strcmp(c.region, "auto"));	/* back to following the network */
+	/* any row of the number table, not only the shipped one (core/numbers.h) */
+	assert(config_set(&c, "region", "IN", f) == 0 && !strcmp(c.region, "IN"));
+	assert(config_set(&c, "region", "AU", f) == 0 && !strcmp(c.region, "AU"));
+	assert(config_set(&c, "region", "lk", f) == -EINVAL && !strcmp(c.region, "AU"));	/* the name is exact and upper case */
 	assert(config_set(&c, "region", "", f) == -EINVAL);
-	assert(config_set(&c, "region", "ZZ", f) == -EINVAL && !strcmp(c.region, "LK"));
+	assert(config_set(&c, "region", "ZZ", f) == -EINVAL && !strcmp(c.region, "AU"));
+	assert(config_set(&c, "region", "LKA", f) == -EINVAL && !strcmp(c.region, "AU"));
 	assert(strstr(log_text(f), "region") && !strstr(log_text(f), "ZZ"));
 	fclose(f);
 }
@@ -312,7 +343,7 @@ static void test_clir_hotline(void)
 	assert(config_set(&c, "hotline_delay", "3", f) == 0 && c.hotline_delay_s == 3);
 	assert(config_set(&c, "hotline_delay", "99", f) == 0 && c.hotline_delay_s == 99);
 	assert(config_set(&c, "hotline_delay", "2", f) == -EINVAL && config_set(&c, "hotline_delay", "100", f) == -EINVAL);
-	assert(config_set(&c, "hotline_delay", "0", f) == -EINVAL && c.hotline_delay_s == 99);	/* never 0: the user can always dial first (U3) */
+	assert(config_set(&c, "hotline_delay", "0", f) == -EINVAL && c.hotline_delay_s == 99);	/* never 0: the person at the phone can always dial first */
 	assert(!strstr(log_text(f), "12a") && !strstr(log_text(f), "555"));
 	fclose(f);
 }
@@ -340,7 +371,7 @@ static void test_unknown_names(void)
 
 	config_defaults(&c);
 	config_defaults(&ref);
-	/* the M5 options and the page's own options: ignored by the caller, nothing logged, nothing changed
+	/* options this build does not read, and the page's own: ignored by the caller, nothing logged, nothing changed
 	 * (led, ring_rate_ms and offhook_rate_ms are settings since the phone LED: test_indicator) */
 	assert(config_set(&c, "mic_gain_db", "3", f) == -ENOENT);
 	assert(config_set(&c, "mic_gain_db", "3", f) == -ENOENT);
@@ -431,6 +462,29 @@ static void test_folders(void)
 	fclose(f);
 }
 
+static void test_sip_mode(void)
+{
+	struct aw_config c, ref;
+	FILE *f = log_open();
+
+	config_defaults(&ref);
+	assert(!strcmp(ref.sip_mode, "web"));
+	config_defaults(&c);
+	assert(config_set_sip(&c, NULL, f) == 0 && !strcmp(c.sip_mode, "web"));	/* no section, no option */
+	assert(config_set_sip(&c, "web", f) == 0 && !strcmp(c.sip_mode, "web"));
+	assert(config_set_sip(&c, "interop", f) == 0 && !strcmp(c.sip_mode, "interop"));
+	assert(config_set_sip(&c, "baresip", f) == 0 && !strcmp(c.sip_mode, "baresip"));
+	/* a word this build does not have is refused, and the mode already in place stays: a settings file holding a word
+	   from elsewhere does not silently move the line to a side the build cannot run */
+	assert(config_set_sip(&c, "off", f) == -EINVAL && !strcmp(c.sip_mode, "baresip"));
+	/* a word this build has no front-end for leaves the line the handset's */
+	assert(config_set_sip(&c, "voipd", f) == -EINVAL && !strcmp(c.sip_mode, "baresip"));
+	assert(config_set_sip(&c, "", f) == -EINVAL && !strcmp(c.sip_mode, "baresip"));
+	assert(config_set_sip(&c, "Interop", f) == -EINVAL && !strcmp(c.sip_mode, "baresip"));
+	assert(strstr(log_text(f), "sip.mode"));
+	fclose(f);
+}
+
 int main(void)
 {
 	test_defaults();
@@ -446,6 +500,8 @@ int main(void)
 	test_folders();
 	test_unknown_names();
 	test_cross_rule();
+	test_sip_mode();
+	test_web_options();
 	free(log_buf);
 	printf("config: all tests passed\n");
 	return 0;

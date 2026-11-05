@@ -8,7 +8,7 @@
 #include "../core/phone.h"
 
 /*
- * The call log: the last CALLLOG_MAX calls, newest first, one record per finished call (the page's `Call`, data contract v2).
+ * The call log: the last CALLLOG_MAX calls, newest first, one record per finished call (the page's `Call`).
  * The numbers in it are the one place a number may be stored; the file is readable by root only and the ubus methods
  * that return it sit behind the page's ACL.
  *
@@ -35,6 +35,7 @@ struct calllog_entry {
 	int cause;			/* TS 24.008, 0 = unknown */
 	char recording[48];		/* the recording's file name in the recordings directory, "" = none */
 	char message[48];		/* the answering machine's message file name in the messages directory, "" = none */
+	enum phone_answered_by answered_by;	/* who took the call: the handset, the machine, or the SIP front end */
 };
 
 struct calllog {

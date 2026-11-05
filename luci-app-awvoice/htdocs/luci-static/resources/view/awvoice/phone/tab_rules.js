@@ -5,9 +5,9 @@
 'require view.awvoice.phone.editors as editors';
 
 /*
- * tab_rules.js - Rules tab: phone book, call blocking and alarm (wake-up) calls, each as a
- * sub-section chosen with the chips. These features arrive with a later milestone: while their api methods are not
- * available the tab shows a note and every control is disabled; the code is complete so only the provider changes.
+ * tab_rules.js - Rules tab: phone book, call blocking, alarm (wake-up) calls and quiet hours, each as a
+ * sub-section chosen with the chips. Where a door is not there yet the tab shows a note and every control is
+ * disabled, so nothing is half-clickable; the code beside it is complete and only the provider answers.
  */
 
 var DELAYS = [ 5, 10, 15, 20, 25, 30 ];       /* seconds; the standard range is 1..30, these are the values networks commonly accept */
@@ -23,8 +23,8 @@ return baseclass.extend({
 		var ready = !!(a.listContacts && a.getBlocking && a.listAlarms);
 		/* no Forwarding pane: this network's registration carries no supplementary-service channel for it
 		 * ); the daemon's forwarding code and the stored rule stay until the network offers it again */
-		var subs = [ [ 'pb', _('Phone book') ], [ 'bl', _('Call blocking') ], [ 'al', _('Alarm call') ] ];
-		var chips = E('div', { 'class': 'av-chips', 'role': 'group', 'aria-label': _('Rule type') });
+		var subs = [ [ 'pb', _('Phone book') ], [ 'bl', _('Call blocking') ], [ 'al', _('Alarm call') ], [ 'qh', _('Quiet hours') ] ];
+		var chips = E('div', { 'class': 'av-chips cbi-tabmenu', 'role': 'group', 'aria-label': _('Rule type') });
 		var panes = {};
 
 		/* ---------- phone book ---------- */
@@ -39,6 +39,7 @@ return baseclass.extend({
 					u.icon('user'),
 					E('div', { 'class': 't' }, [ c.name, E('small', { 'class': 'av-mono' }, nums) ]),
 					c.quick ? u.tag(_('Speed %s').format(c.quick)) : '',
+					c.ringThrough ? u.tag(_('Rings through quiet hours')) : '',
 					u.iconButton(_('Edit'), 'edit', function() { editors.contact(ctx, c, '', drawBook); }),
 					u.iconButton(_('Delete'), 'trash', function() {
 						editors.confirm(ctx, _('Delete contact'), _('Delete %s from the phone book?').format(c.name), _('Delete'), function() {
@@ -127,6 +128,69 @@ return baseclass.extend({
 			alList
 		]);
 
+		/* ---------- quiet hours ---------- */
+		var quiet = { windows: [], allow: [] };
+		var qhList = E('div');
+		var qhAllowOut = E('small', { 'class': 'av-mono' });
+		var MODE_WORD = { silent: _('Silent'), machine: _('Answering machine'), reject: _('Reject') };
+		function quietSpan(w) {
+			return w.allDay ? _('All day') : w.from + ' – ' + w.to;
+		}
+		function drawQuiet() {
+			qhList.textContent = '';
+			if (!quiet.windows.length)
+				qhList.appendChild(E('div', { 'class': 'av-empty' }, _('No quiet-hours windows yet.')));
+			quiet.windows.forEach(function(w) {
+				var on = u.checkbox(w.enabled, '', function(v) {
+					ctx.api.saveQuiet(Object.assign({}, w, { enabled: v })).then(refreshQuiet, function(e) {
+						ctx.toast(e.message);
+						refreshQuiet();
+					});
+				});
+				on.input.setAttribute('aria-label', _('Quiet hours %s on').format(quietSpan(w)));
+				qhList.appendChild(E('div', { 'class': 'av-it' }, [
+					u.icon('clock'),
+					E('div', { 'class': 't' }, [ quietSpan(w), E('small', u.summarizeDays(w.days)) ]),
+					MODE_WORD[w.mode] ? u.tag(MODE_WORD[w.mode]) : '',
+					w.repeatMin ? u.tag(_('Again in %d min').format(w.repeatMin)) : '',
+					on.node,
+					u.iconButton(_('Edit'), 'edit', function() { editors.quiet(ctx, w, refreshQuiet); }),
+					u.iconButton(_('Delete'), 'trash', function() {
+						editors.confirm(ctx, _('Delete quiet hours'), _('Delete the %s quiet-hours window?').format(quietSpan(w)), _('Delete'), function() {
+							return ctx.api.removeQuiet(w.id).then(refreshQuiet);
+						});
+					}, 'cbi-button-remove')
+				]));
+			});
+			qhAllowOut.textContent = quiet.allow.length ? quiet.allow.join('   ') : _('None set');
+			/* the numbers are held beside a window, because that is where the line reads them from */
+			qhAllowBtn.disabled = !quiet.windows.length;
+		}
+		function refreshQuiet() {
+			return ctx.api.listQuiet().then(function(r) {
+				quiet = r;
+				drawQuiet();
+			}, function(e) { ctx.toast(e.message); });
+		}
+		var qhAllowBtn = u.button(_('Edit'), 'edit', '', function() {
+			editors.list(ctx, _('Numbers that always ring through'), quiet.allow, false, function(list) {
+				return ctx.api.saveQuietAllow(list).then(function(saved) {
+					quiet.allow = saved;
+					drawQuiet();
+					ctx.toast(_('Saved'));
+				});
+			});
+		});
+		panes.qh = E('div', { 'class': 'cbi-section' }, [
+			E('h3', [ _('Quiet hours'), E('span', { 'class': 'av-r' }, u.button(_('Add window'), 'plus', 'cbi-button-action important', function() {
+				editors.quiet(ctx, null, refreshQuiet);
+			})) ]),
+			qhList,
+			u.field(_('Always ring through'), '', E('div', { 'class': 'av-inline' }, [ qhAllowOut, qhAllowBtn ])),
+			E('div', { 'class': 'av-note' }, _('The first window that covers the call decides, in the order the windows were written.')),
+			E('div', { 'class': 'av-note' }, _('A caller listed here, or a contact marked to ring through quiet hours, rings whatever the window says. Emergency numbers always ring.'))
+		]);
+
 		/* ---------- chips ---------- */
 		function show(id) {
 			active = id;
@@ -137,7 +201,7 @@ return baseclass.extend({
 				panes[s[0]].hidden = s[0] !== active;
 			});
 		}
-		var root = E('div', [ u.off([ chips, panes.pb, panes.bl, panes.al ]) ]);
+		var root = E('div', [ u.off([ chips, panes.pb, panes.bl, panes.al, panes.qh ]) ]);
 		show('pb');
 
 		ctx.on('contacts', drawBook);
@@ -150,9 +214,12 @@ return baseclass.extend({
 		drawBook();
 		drawBlocking();
 		drawAlarms();
+		drawQuiet();
 		if (ready) {
 			ctx.api.getBlocking().then(function(b) { blocking = b; drawBlocking(); }, function(e) { ctx.toast(e.message); });
 		}
+		if (a.listQuiet)
+			refreshQuiet();
 		return root;
 	}
 });

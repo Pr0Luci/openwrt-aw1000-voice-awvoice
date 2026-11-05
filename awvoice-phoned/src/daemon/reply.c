@@ -4,7 +4,30 @@
 #include <string.h>
 
 #include "phonebook.h"
+#include "dnd.h"
 #include "reply.h"
+
+/* why the line is quiet, and what was asked of it: the health reply's two words, dnd.h owns the meanings */
+static const char *quiet_cause_word(int cause)
+{
+	switch (cause) {
+	case DND_CAUSE_WINDOW:	return "window";
+	case DND_CAUSE_ALL_DAY:	return "all-day";
+	case DND_CAUSE_MANUAL:	return "manual";
+	default: break;
+	}
+	return "";
+}
+
+static const char *quiet_ask_word(int manual)
+{
+	switch (manual) {
+	case DND_MANUAL_ON:	return "quiet";
+	case DND_MANUAL_OFF:	return "ringing";
+	default: break;
+	}
+	return "schedule";
+}
 
 const char *reply_state_name(enum phone_line line)
 {
@@ -33,7 +56,7 @@ const char *reply_phase_name(enum call_state call, enum phone_dir dir, int answe
 	case CALL_NONE:
 		break;
 	}
-	/* the modem has not listed the call yet (or lists it as gone): what we know is the direction and the answer */
+	/* the modem has not listed the call yet (or lists it as gone): all that is known is the direction and the answer */
 	if (answered)
 		return "active";
 	return dir == PHONE_DIR_IN ? "ringing" : "dialing";
@@ -62,6 +85,16 @@ static void network(const struct reply_sink *o, const struct phone_status *st)
 		o->text(o->ctx, "network", st->network);
 	else
 		o->null(o->ctx, "network");
+	/* the network the line is registered on, as the three digits it is known by (ITU-T E.212): the code the numbering
+	 * plan is chosen from when the setting is auto */
+	if (st->mcc[0])
+		o->text(o->ctx, "operator", st->mcc);
+	else
+		o->null(o->ctx, "operator");
+	if (st->netname[0])
+		o->text(o->ctx, "operatorName", st->netname);
+	else
+		o->null(o->ctx, "operatorName");
 }
 
 void reply_status(const struct reply_sink *o, const struct phone_status *st, const struct reply_info *info, unsigned long long now_ms)
@@ -71,6 +104,7 @@ void reply_status(const struct reply_sink *o, const struct phone_status *st, con
 		o->text(o->ctx, "line", "down");
 		o->null(o->ctx, "hook");
 		o->null(o->ctx, "machine");
+		o->null(o->ctx, "quiet");
 		o->null(o->ctx, "call");
 	} else {
 		o->text(o->ctx, "state", reply_state_name(st->line));
@@ -78,6 +112,9 @@ void reply_status(const struct reply_sink *o, const struct phone_status *st, con
 		o->text(o->ctx, "hook", st->off_hook ? "off" : "on");
 		o->text(o->ctx, "machine", st->machine == PHONE_MACHINE_ANSWERING ? "answering"
 			: st->machine == PHONE_MACHINE_ANSWERED ? "answered" : "none");
+		/* the network offers the call and a lifted handset answers it, but quiet hours keep this side from making
+		 * a sound: the page must not say the phone is ringing when it is deliberately not */
+		o->flag(o->ctx, "quiet", st->quiet != 0);
 		if (!st->call_id) {
 			o->null(o->ctx, "call");
 		} else {
@@ -132,10 +169,13 @@ void reply_health(const struct reply_sink *o, const struct phone_status *st, con
 	o->number(o->ctx, "usbInterface", info->at_interface);
 	o->flag(o->ctx, "responding", info->line_in_service && st->modem_up);
 	ago_s(o, "lastReplyAgoSec", st->modem_reply_ms, now_ms);
+	o->text(o->ctx, "portOwner", info->sip_port_owner ? info->sip_port_owner : "free");
 	o->close(o->ctx);
 
 	o->open(o->ctx, "line", 0);
 	o->number(o->ctx, "channel", info->channel);
+	/* the numbering plan the line reads numbers with: the one the setting names, or the one the network pointed at */
+	o->text(o->ctx, "numbering", info->region ? info->region : "");
 	o->text(o->ctx, "hook", st->off_hook ? "off" : "on");
 	o->text(o->ctx, "state", info->line_in_service ? phone_line_name(st->line) : "down");
 	o->flag(o->ctx, "calibrated", info->line_in_service);	/* the daemon serves only after the calibration stages passed */
@@ -154,8 +194,13 @@ void reply_health(const struct reply_sink *o, const struct phone_status *st, con
 	network(o, st);
 	tri(o, "audioSlave", st->audio_slave);
 	o->text(o->ctx, "hdVoice", info->hd == 2 ? "on" : info->hd == 1 ? "set" : "off");
+	/* the two facts that make the setting judgeable from outside: what the modem says it puts on the bus, and what
+	   this line was actually brought up at. Without them a half-changed layout is invisible - the PCM slots, the
+	   chip's bring-up and the bridge move together or not at all (phone.h, phone_layout_due). */
+	tri(o, "audioRate", st->audio_rate);
+	o->number(o->ctx, "voiceLayout", info->layout ? 16000 : 8000);
 	tri(o, "callWaiting", st->call_waiting_net);
-	/* what the network reports for the caller-id restriction after our write (AT+CLIR?): the setting and its provisioning state */
+	/* what the network reports for the caller-id restriction after the write asked here (AT+CLIR?): the setting and its provisioning state */
 	if (st->clir < 0 || st->clir > 2)
 		o->null(o->ctx, "clir");
 	else
@@ -210,11 +255,29 @@ void reply_health(const struct reply_sink *o, const struct phone_status *st, con
 	o->number(o->ctx, "faults", st->faults);
 	o->close(o->ctx);
 
-	/* the answering machine: whether its greeting is loaded at all (a refused file switches the machine off) */
+	/* the answering machine's greeting: what the daemon holds whatever the switch says, and the word for why not */
 	o->open(o->ctx, "machine", 0);
 	o->flag(o->ctx, "greetingLoaded", info->machine_greeting);
 	o->number(o->ctx, "greetingMs", info->machine_greeting_ms);
+	o->text(o->ctx, "greetingError", info->machine_greeting_err ? info->machine_greeting_err : "");
 	o->number(o->ctx, "delaySec", info->machine_delay_s);
+	o->close(o->ctx);
+
+	/* quiet hours: whether the line must stay quiet right now, what decided that, and what was asked of it. The
+	 * windows themselves are the settings page's to read from the config; this is the answer they add up to. */
+	o->open(o->ctx, "quiet", 0);
+	{
+		struct dnd_state decided;
+
+		decided.quiet = 0;
+		decided.cause = DND_CAUSE_NONE;
+		if (info->dnd)
+			dnd_decide(info->dnd->window, info->dnd->count, info->dnd->manual, info->dnd->now.clock_known,
+				info->dnd->now.weekday, info->dnd->now.minute, &decided);
+		o->flag(o->ctx, "on", decided.quiet);
+		o->text(o->ctx, "cause", quiet_cause_word(decided.cause));
+		o->text(o->ctx, "ask", quiet_ask_word(info->dnd ? info->dnd->manual : DND_MANUAL_AUTO));
+	}
 	o->close(o->ctx);
 
 	/* the two folders the files land in, as they stood at the last check (start-up, a reload, a call's start): a
@@ -222,6 +285,22 @@ void reply_health(const struct reply_sink *o, const struct phone_status *st, con
 	o->open(o->ctx, "storage", 0);
 	storage_sink(o, "recordings", info->record_path, &info->record_store);
 	storage_sink(o, "messages", info->message_path, &info->message_store);
+	o->close(o->ctx);
+
+	/* the line's own side of the mode: which mode the settings ask for, and the browser-audio listener that serves
+	 * it (its word, its port and the address it is bound to) */
+	o->open(o->ctx, "web", 0);
+	o->text(o->ctx, "mode", info->sip_mode ? info->sip_mode : "web");
+	o->text(o->ctx, "audio", info->sip_web_audio ? info->sip_web_audio : "off");
+	o->number(o->ctx, "port", (long long)info->sip_web_port);
+	o->text(o->ctx, "address", info->sip_web_addr ? info->sip_web_addr : "");
+	o->close(o->ctx);
+	/* the installed SIP service's side: who owns the qmodem_voip name, the last refusal the object logged, and the
+	 * consumer that holds a media binding (0 while none does) */
+	o->open(o->ctx, "sip", 0);
+	o->text(o->ctx, "objectOwner", info->sip_object_owner ? info->sip_object_owner : "none");
+	o->text(o->ctx, "lastRefusal", info->sip_last_refusal ? info->sip_last_refusal : "");
+	o->number(o->ctx, "consumerPid", info->sip_consumer_pid);
 	o->close(o->ctx);
 }
 
@@ -259,6 +338,7 @@ void reply_calls(const struct reply_sink *o, const struct calllog *log, const st
 		o->number(o->ctx, "durationSec", e->duration_s);
 		o->text(o->ctx, "recording", e->recording);
 		o->text(o->ctx, "message", e->message);
+		o->text(o->ctx, "answeredBy", phone_answered_by_name(e->answered_by));
 		o->text(o->ctx, "result", phone_result_name(e->result));
 		o->number(o->ctx, "cause", e->cause);
 		o->close(o->ctx);
@@ -298,5 +378,29 @@ const char *reply_refusal(int err, int off_hook)
 	case -EBUSY:	return off_hook ? "OFF_HOOK" : "ACTIVE_CALL";
 	case -ENODEV:	return "SERVICE_DOWN";
 	default:	return "NOT_AVAILABLE";
+	}
+}
+
+/*
+ * The one word a greeting's state goes by. The health reply and the upload methods' refusals share it, so the page
+ * learns one vocabulary about one file: the word names what is wrong with the audio, and the page turns it into a
+ * sentence the user can act on. An errno nobody expected still gets a word - "UNREADABLE" - because a file the daemon
+ * could not make sense of is worth telling the user about whatever the reason turns out to be.
+ */
+const char *reply_greeting_word(int err)
+{
+	switch (err) {
+	case 0:			return "";
+	case -ENOENT:		return "MISSING";
+	case -EINVAL:		return "FORMAT";
+	case -ENODATA:	return "EMPTY";
+	case -EBADMSG:	return "TRUNCATED";
+	case -EFBIG:		return "TOO_BIG";
+	case -ENOMEM:		return "MEMORY";
+	case -ELOOP:		return "SYMLINK";
+	case -EBUSY:		return "BUSY";
+	case -EPROTO:	return "OFFSET";
+	case -EIO:		return "IO";
+	default:		return "UNREADABLE";
 	}
 }

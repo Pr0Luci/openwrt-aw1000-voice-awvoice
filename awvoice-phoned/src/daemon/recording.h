@@ -122,8 +122,108 @@ static inline u32 recording_base64(const void *in, u32 len, char *out)
 	return o;
 }
 
+/*
+ * How many plain bytes a base64 string of `len` characters carries: three for every quad, less the padding that ends
+ * it. A caller who caps an upload piece caps bytes, not characters, and a padded last quad is one or two bytes rather
+ * than three - count the characters and a piece exactly at the cap looks two bytes over it and is refused for padding
+ * that carries nothing. Padding away from the end stays in the count, which is then only an upper bound: the decoder
+ * below is the one that refuses such a string. 0 or -EINVAL (no string, a length that is not a whole number of quads).
+ */
+static inline int recording_base64_plain_len(const char *in, u32 len, u32 *out)
+{
+	u32 pad = 0;
+
+	*out = 0;
+	if (!in || len % 4)
+		return -EINVAL;
+	if (!len)
+		return 0;
+	if (in[len - 1] == '=') {
+		pad = 1;
+		if (in[len - 2] == '=')
+			pad = 2;
+	}
+	*out = len / 4 * 3 - pad;
+	return 0;
+}
+
+/*
+ * The way back, for what the page uploads: standard base64 (RFC 4648) decoded into `out`, whose capacity is `out_cap`.
+ * Strict on purpose - a length that is not a whole number of quads, a character outside the alphabet, or padding that
+ * is not the file's last two bytes at most is -EINVAL and nothing is written. A piece that decoded "as far as it could"
+ * would be audio with a hole in it, and a greeting of a hole is worse than a refused upload.
+ *
+ * Returns 0 with the decoded length in `out_len`, or -EINVAL (a bad character, an unquaddable length, padding in the
+ * wrong place) or -ENOSPC (the piece does not fit the caller's room).
+ */
+static inline int recording_base64_decode(const char *in, u32 len, unsigned char *out, u32 out_cap, u32 *out_len)
+{
+	static const signed char values[] = {
+		-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+		-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+		-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63,	/* '+' and '/' */
+		52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1,	/* A..Z then 0..9 */
+		-1,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,
+		15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1,
+		-1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+		41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1
+	};
+	unsigned long long v;
+	u32 o = 0, k, keep;
+
+	*out_len = 0;
+	if (!in || !out || len % 4)
+		return -EINVAL;
+	if (!len)
+		return 0;
+	for (k = 0; k < len; k += 4) {
+		int pad = 0, j;
+
+		for (j = 0; j < 4; j++) {
+			unsigned char c = (unsigned char)in[k + j];
+
+			if (c != '=' && (c > 127 || values[c] < 0))
+				return -EINVAL;		/* a character that is not in the alphabet at all */
+			if (c == '=') {
+				/* padding only in the last quad, only in its last two places, and never followed by data */
+				if (k + 4 != len || j < 2)
+					return -EINVAL;
+				pad++;
+				continue;
+			}
+			if (pad)
+				return -EINVAL;		/* data after padding: the length cannot be trusted */
+		}
+		keep = 3 - pad;
+		if (o + keep > out_cap)
+			return -ENOSPC;
+		v = 0;
+		for (j = 0; j < 4; j++) {
+			unsigned char c = (unsigned char)in[k + j];
+			int val = c == '=' ? 0 : values[c];
+
+			/* the bits a padded group does not carry must be zero: an encoding that puts bits there decodes to
+			 * the same bytes as another and is not the canonical form - two spellings of one file is a thing a
+			 * checksum-free writer should not accept */
+			if (pad == 1 && j == 2 && (val & 0x03))
+				return -EINVAL;
+			if (pad == 2 && j == 1 && (val & 0x0f))
+				return -EINVAL;
+			v = (v << 6) | (unsigned long long)val;
+		}
+		if (keep > 0)
+			out[o++] = (unsigned char)(v >> 16);
+		if (keep > 1)
+			out[o++] = (unsigned char)(v >> 8);
+		if (keep > 2)
+			out[o++] = (unsigned char)v;
+	}
+	*out_len = o;
+	return 0;
+}
+
 /* read a recording's header back: the rate, the channel count and the data size behind it. -EINVAL when the bytes
- * are not one of ours (mono or stereo 16-bit PCM at one of the bus's rates is what we ever write). */
+ * are not one this writer makes (mono or stereo 16-bit PCM at one of the bus's rates is all it ever writes). */
 static inline int recording_wav_probe(const void *hdr44, u32 *rate, u32 *channels, u32 *data_bytes)
 {
 	const unsigned char *p = hdr44;

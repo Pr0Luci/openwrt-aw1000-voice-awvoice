@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Copyright (C) 2026 Pr0Luci
 #
-# rpcd plugin "luci.awvoice": the phone page's one privileged action, start / stop / restart of the phone service.
-# The authority is here, not in the page: stop and restart are refused while a call is going (the service's own status
-# says so), then the service is driven through procd's rc object.
+# rpcd plugin "luci.awvoice": the phone page's privileged actions. Start / stop / restart of the phone service, and the
+# presence facts about the installed SIP service the SIP tab shows (a config, an init script, the media socket, the
+# consumer's credential file, the consumers' pids). The authority is here, not in the page: stop and restart of the phone
+# service are refused while a call is going (the service's own status says so), then the service is driven through
+# procd's rc object. The SIP facts are read-only and carry no credential content.
 
 SERVICE=awvoice
 
@@ -46,13 +48,127 @@ service() {
 	fi
 }
 
+# a pidfile's process, when it is alive; 0 otherwise (a stale file after a crash)
+live_pid() {
+	local pid rest
+	[ -f "$1" ] || { echo 0; return; }
+	# the consumer's pidfile holds its pid and the start time: only the first field is the pid
+	read -r pid rest < "$1" 2>/dev/null || pid=
+	case "$pid" in
+	''|*[!0-9]*) echo 0; return ;;
+	esac
+	if [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null; then echo "$pid"; else echo 0; fi
+}
+
+# presence only: never a credential's content, never a config value except the socket's path (a location, not a secret)
+sipdiag() {
+	local cfg script cred sock
+	cfg=/etc/config/qmodem_sip
+	script=/etc/init.d/qmodem_voip_sipd
+	cred=/var/run/qmodem_voip/sip.conf
+	sock=$(uci -q get qmodem_sip.main.media_socket_path 2>/dev/null)
+	case "$sock" in
+	/[A-Za-z0-9_./-]*) ;;
+	*) sock=/var/run/qmodem_voip/media.sock ;;
+	esac
+	printf '{"status":"ok","config":%s,"script":%s,"mediaSocket":%s,"credentials":%s,"socketPath":"%s","inboundPid":%s,"outboundPid":%s}\n' \
+		"$([ -f "$cfg" ] && echo true || echo false)" \
+		"$([ -x "$script" ] && echo true || echo false)" \
+		"$([ -S "$sock" ] && echo true || echo false)" \
+		"$([ -f "$cred" ] && echo true || echo false)" \
+		"$sock" \
+		"$(live_pid /var/run/qmodem_voip/sip-inbound.pid)" \
+		"$(live_pid /var/run/qmodem_voip/sip-outbound.pid)"
+}
+
+# ---- the one-time account code -----------------------------------------------------------------------
+#
+# A scanned code carries a phone a URL only, so the account itself is served as a file. The listener that
+# answers plain HTTP belongs to the image's own web server configuration; this reads it, never opens it.
+PROV_HELPER=/usr/libexec/awvoice-provision
+# the directory the provisioning listener serves: its own, so nothing else on the router is
+# reachable over that plain address
+PROV_DIR=/www/awvoice-provision
+PROV_PORT=8080
+PROV_TTL=600
+# the word the installed SIP service challenges with; a phone matches a credential on the realm, not on the
+# address, so getting this wrong is a phone that asks for a password it was just given
+PROV_REALM=qmodem-voip
+
+# the uhttpd section, if any, that listens for plain HTTP on the provisioning port without redirecting
+provision_listener() {
+	local s http redir
+	for s in $(uci -q show uhttpd 2>/dev/null | sed -n 's/^uhttpd\.\([^.]*\)=uhttpd$/\1/p'); do
+		http=$(uci -q get "uhttpd.$s.listen_http" 2>/dev/null)
+		redir=$(uci -q get "uhttpd.$s.redirect_https" 2>/dev/null)
+		[ "$redir" = 1 ] && continue
+		case "$http" in
+		*":$PROV_PORT"*) echo "$s"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+# the address a phone on that network reaches this router on. The logical interface names the bridge or NIC
+# it is carried on, and the kernel is asked for the address on that device: jsonfilter cannot name a key
+# holding a dash, and the network's own answer is filed under one.
+provision_address() {
+	local ifn dev
+	ifn=$1
+	case "$ifn" in
+	''|*[!A-Za-z0-9_.-]*) return 1 ;;
+	esac
+	dev=$(ubus call network.interface."$ifn" status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+	case "$dev" in
+	''|*[!A-Za-z0-9_.-]*) return 1 ;;
+	esac
+	ip -4 -o addr show dev "$dev" 2>/dev/null | sed -n 's/^[0-9]*: [^ ]*  *inet \([0-9.]*\)\/.*$/\1/p' | head -1
+}
+
+provision() {
+	local user pass port ifn addr out detail
+	user=$(uci -q get qmodem_sip.inbound.username 2>/dev/null)
+	pass=$(uci -q get qmodem_sip.inbound.password 2>/dev/null)
+	port=$(uci -q get qmodem_sip.inbound.listen_port 2>/dev/null)
+	ifn=$(uci -q get qmodem_sip.inbound.interface 2>/dev/null)
+
+	[ -x "$PROV_HELPER" ] || { printf '{"ok":false,"reason":"NOT_AVAILABLE"}\n'; return; }
+	case "$port" in
+	''|*[!0-9]*) port=5060 ;;
+	esac
+
+	[ -n "$(provision_listener)" ] || { printf '{"ok":false,"reason":"NO_ENDPOINT"}\n'; return; }
+	[ "$(uci -q get qmodem_sip.inbound.enabled)" = 1 ] || { printf '{"ok":false,"reason":"DIRECTION_OFF"}\n'; return; }
+	[ -n "$user" ] || { printf '{"ok":false,"reason":"NO_ACCOUNT"}\n'; return; }
+	[ -n "$pass" ] || { printf '{"ok":false,"reason":"NO_PASSWORD"}\n'; return; }
+	addr=$(provision_address "$ifn")
+	case "$addr" in
+	''|*[!0-9a-fA-F.:]*) printf '{"ok":false,"reason":"NO_ADDRESS"}\n'; return ;;
+	esac
+
+	out=$("$PROV_HELPER" build --out "$PROV_DIR" --path '' --user "$user" --passwd "$pass" --host "$addr" \
+		--port "$port" --webport "$PROV_PORT" --realm "$PROV_REALM" --ttl "$PROV_TTL")
+	case "$out" in
+	'{'*'"ok":true'*'}') printf '%s\n' "$out" ;;
+	'{'*'"reason":"'*)
+		# the writer's own refusal travels as a detail: the page is told one thing - the code could not be
+		# written - and the word the writer used is kept beside it for whoever reads this back
+		detail=$(printf '%s' "$out" | sed -n 's/.*"reason":"\([A-Z_]*\)".*/\1/p')
+		printf '{"ok":false,"reason":"HELPER_FAILED","detail":"%s"}\n' "$detail"
+		;;
+	*) printf '{"ok":false,"reason":"HELPER_FAILED","detail":"NO_ANSWER"}\n' ;;
+	esac
+}
+
 case "$1" in
 list)
-	printf '{"service":{"action":"str"}}\n'
+	printf '{"service":{"action":"str"},"sipdiag":{},"provision":{}}\n'
 	;;
 call)
 	case "$2" in
 	service) service ;;
+	sipdiag) sipdiag ;;
+	provision) provision ;;
 	esac
 	;;
 esac

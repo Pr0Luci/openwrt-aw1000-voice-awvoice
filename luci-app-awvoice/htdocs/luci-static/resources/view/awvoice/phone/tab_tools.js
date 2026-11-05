@@ -23,7 +23,7 @@ return baseclass.extend({
 				ok: _('Loopback ready. Lift the handset and speak.'), ready: ctx.api.available.loopbackTest }
 		];
 
-		var ban = E('div', { 'class': 'av-ban w' }, [ u.icon('info'), E('div', _('Tests need an idle line with the handset on hook, and a running phone service.')) ]);
+		var ban = E('div', { 'class': 'av-ban alert-message warning' }, [ u.icon('info'), E('div', _('Tests need an idle line with the handset on hook, and a running phone service.')) ]);
 
 		function sync(st) {
 			idle = st.state === 'idle';

@@ -102,7 +102,10 @@ needed=$(readelf -d "$dbin" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p')
 [ -n "$needed" ] || die "the daemon has no NEEDED entries"
 for lib in $needed; do
 	case "$lib" in
-	libc.so|libc.so.*|libubox.so|libubox.so.*|libubus.so|libubus.so.*|libuci.so|libuci.so.*|libgcc_s.so|libgcc_s.so.*) ;;
+	# the daemon's browser-audio listener terminates the encrypted page stream itself (daemon/web_tls.c), so the
+	# three mbedTLS libraries are its declared dependencies (Package/awvoice-phoned: +libmbedtls); nothing else
+	libc.so|libc.so.*|libubox.so|libubox.so.*|libubus.so|libubus.so.*|libuci.so|libuci.so.*|libgcc_s.so|libgcc_s.so.*|\
+	libmbedtls.so|libmbedtls.so.*|libmbedx509.so|libmbedx509.so.*|libmbedcrypto.so|libmbedcrypto.so.*) ;;
 	*) die "the daemon needs $lib, outside the allowed set" ;;
 	esac
 done
