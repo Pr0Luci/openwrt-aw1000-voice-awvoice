@@ -11,14 +11,15 @@
 'require view.awvoice.phone.tab_calls as tabCalls';
 'require view.awvoice.phone.tab_rules as tabRules';
 'require view.awvoice.phone.tab_settings as tabSettings';
+'require view.awvoice.phone.tab_sip as tabSip';
 'require view.awvoice.phone.tab_health as tabHealth';
 'require view.awvoice.phone.tab_tools as tabTools';
 
 /*
  * phone.js - Services > Phone
  *
- * One page, six tabs (Overview, Calls, Rules, Phone settings, Health, Test tools). The page renders only the content
- * area; the active LuCI theme provides the chrome and style.js maps the colours to whichever theme is active.
+ * One page, seven tabs (Overview, Calls, Rules, Phone settings, SIP, Health, Test tools). The page renders only the
+ * content area; the active LuCI theme provides the chrome and style.js maps the colours to whichever theme is active.
  *
  * All data comes through phone/api.js. Deep links: #tab=calls&rules=bl&sel=2
  */
@@ -37,6 +38,7 @@ function tabList() {
 		{ id: 'calls', title: _('Calls'), icon: 'phone', mod: tabCalls },
 		{ id: 'rules', title: _('Rules'), icon: 'filter', mod: tabRules },
 		{ id: 'set', title: _('Phone settings'), icon: 'sliders', mod: tabSettings },
+		{ id: 'sip', title: _('SIP'), icon: 'radio', mod: tabSip },
 		{ id: 'health', title: _('Health'), icon: 'activity', mod: tabHealth },
 		{ id: 'tools', title: _('Test tools'), icon: 'tool', mod: tabTools }
 	];
@@ -54,7 +56,7 @@ function parseHash() {
 function makeToast(msg) {
 	var t = document.getElementById(TOAST_ID);
 	if (!t) {
-		t = E('div', { 'id': TOAST_ID, 'class': 'av-toast', 'role': 'status', 'hidden': true });
+		t = E('div', { 'id': TOAST_ID, 'class': 'av-toast alert-message', 'role': 'status', 'hidden': true });
 		document.body.appendChild(t);
 	}
 	t.textContent = msg;
@@ -223,7 +225,17 @@ return view.extend({
 
 		panes.forEach(function(p) {
 			p.addEventListener('cbi-tab-active', function(ev) {
+				var left = activeTab;
+
 				activeTab = ev.detail.tab;
+				/* a tab that is no longer shown is told so: the greeting card gives the microphone back and stops the
+				 * sound it was playing, and an upload it had begun is dropped rather than left half staged */
+				if (left && left !== activeTab)
+					ctx.emit('tableave', left);
+				/* the tab bar scrolls on narrow screens: the active tab is brought into view, never the page */
+				var a = root.querySelector('.cbi-tabmenu [data-tab="' + activeTab + '"] a');
+				if (a)
+					a.scrollIntoView({ inline: 'center', block: 'nearest' });
 				var h = parseHash();
 				h.tab = activeTab;
 				try {

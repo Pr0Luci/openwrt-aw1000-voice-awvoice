@@ -16,7 +16,7 @@
  * The ACIIR blocks (TXACIIR 518-530, RXACIIR 550-562) are the audio filters of that path: the double-rate
  * mode changes the rate they run at, and their previous design may no longer give the band the standard
  * asks. Deliberately no replacement coefficients are written: the mode is enabled first and the
- * line's own response is measured over the loopback and in calls; a dedicated design (our own)
+ * line's own response is measured over the loopback and in calls; a dedicated design of this project's own
  * is written only if the measurement asks for it. Until then the pre-change snapshot below is both the
  * disable path and the baseline of the measurement.
  */

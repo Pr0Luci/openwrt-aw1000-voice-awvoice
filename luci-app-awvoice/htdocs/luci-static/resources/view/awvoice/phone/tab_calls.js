@@ -11,16 +11,22 @@
  * deleted in its detail; a message is reached through the call the machine answered, and the Settings tab deletes
  * the whole folder.
  *
- * Also exports row() so the Overview "Last calls" list looks the same. The call log is a later milestone: while
- * api.available.listCalls is false the tab shows a note and every control is disabled.
+ * Also exports row() so the Overview "Last calls" list looks the same. Where a door is not there yet
+ * (api.available.listCalls false) the tab shows a note and every control is disabled, so nothing is half-clickable.
  */
 
-var TYPES = [ 'ALL', 'OUT', 'IN', 'MISS', 'BLOCKED' ];
+var TYPES = [ 'ALL', 'OUT', 'IN', 'MISS', 'ANSWERED', 'BLOCKED' ];
 var ICON = { IN: 'phone-in', OUT: 'phone-out', MISS: 'phone-miss' };
 var CLS = { IN: 'av-in', OUT: 'av-out', MISS: 'av-miss' };
 
 function typeLabel(t) {
-	return ({ ALL: _('All'), OUT: _('Outgoing'), IN: _('Incoming'), MISS: _('Missed'), BLOCKED: _('Blocked') })[t];
+	return ({ ALL: _('All'), OUT: _('Outgoing'), IN: _('Incoming'), MISS: _('Missed'), ANSWERED: _('Answered'),
+		BLOCKED: _('Blocked') })[t];
+}
+
+/* who took the call, as the log recorded it */
+function answeredLabel(v) {
+	return ({ handset: _('Handset'), machine: _('Answering machine'), web: _('This page'), sip: _('SIP front-end') })[v] || _('Not answered');
 }
 
 /* a blocked call is the phone with the ban sign, in the missed call's red, whatever its direction */
@@ -28,9 +34,9 @@ function callIcon(u, c) {
 	return c.result === 'blocked' ? u.icon('phone-block', 'av-miss') : u.icon(ICON[c.type], CLS[c.type]);
 }
 
-/* BLOCKED is a view on the records' result, not a call type of its own */
+/* BLOCKED and ANSWERED are views on the records' result, not call types of their own */
 function ofCat(c, t) {
-	return t === 'ALL' ? true : t === 'BLOCKED' ? c.result === 'blocked' : c.type === t;
+	return t === 'ALL' ? true : t === 'BLOCKED' ? c.result === 'blocked' : t === 'ANSWERED' ? c.result === 'answered' : c.type === t;
 }
 
 function resultLabel(r) {
@@ -283,7 +289,9 @@ return baseclass.extend({
 			callIcon(u, c),
 			E('span', { 'class': 'n' }, name || shown),
 			E('span', { 'class': 'd' }, u.fmtWhen(c.ts)),
-			E('span', { 'class': 'm av-mono' }, (name ? c.number : typeLabel(c.type)) + (c.message ? ' · ' + _('Message') : '')),
+			E('span', { 'class': 'm av-mono' }, (name ? c.number : typeLabel(c.type))
+				+ (c.answeredBy && c.answeredBy !== 'none' ? ' · ' + answeredLabel(c.answeredBy) : '')
+				+ (c.message ? ' · ' + _('Message') : '')),
 			E('span', { 'class': 't av-mono' }, u.fmtDuration(c.durationSec))
 		]);
 	},
@@ -292,7 +300,7 @@ return baseclass.extend({
 		var self = this, u = ctx.ui;
 		var cat = 'ALL', sel = null;
 
-		var chips = E('div', { 'class': 'av-chips', 'role': 'group', 'aria-label': _('Filter by call type') });
+		var chips = E('div', { 'class': 'av-chips cbi-tabmenu', 'role': 'group', 'aria-label': _('Filter by call type') });
 		var search = u.text('', _('Search number or name'), 'q');
 		search.setAttribute('aria-label', _('Search calls'));
 		var from = u.text('', '', '', 'date');
@@ -336,11 +344,11 @@ return baseclass.extend({
 
 			if (rec)
 				media.push(playButton(ctx, 'recording', rec.name, rec.bytes),
-					u.button(_('Save'), 'download', 'cbi-button-action', function() { recSave(ctx, rec); }),
+					u.button(_('Save'), 'download', 'cbi-button-save', function() { recSave(ctx, rec); }),
 					u.button(_('Delete'), 'trash', 'cbi-button-remove important', function() { recDelete(ctx, rec); }));
 			if (msg)
 				media.push(playButton(ctx, 'message', msg.name, msg.bytes),
-					u.button(_('Save'), 'download', 'cbi-button-action', function() { msgSave(ctx, msg); }),
+					u.button(_('Save'), 'download', 'cbi-button-save', function() { msgSave(ctx, msg); }),
 					u.button(_('Delete message'), 'trash', 'cbi-button-remove important', function() { msgDelete(ctx, msg); }));
 
 			return E('div', [
@@ -355,6 +363,7 @@ return baseclass.extend({
 				u.kv(_('Date'), u.fmtWhen(c.ts)),
 				u.kv(_('Duration'), u.fmtDuration(c.durationSec), 'av-mono'),
 				u.kv(_('Result'), resultLabel(c.result) + (cause ? ' - ' + cause : '')),
+				u.kv(_('Answered by'), answeredLabel(c.answeredBy)),
 				u.kv(_('Recording'), rec ? u.fmtDuration(rec.seconds) + ' - ' + fmtSize(rec.bytes)
 					+ (rec.channels == 2 ? ' - ' + _('stereo') : '') : _('None')),
 				u.kv(_('Message'), msg ? u.fmtDuration(msg.seconds) + ' - ' + fmtSize(msg.bytes)
@@ -415,10 +424,11 @@ return baseclass.extend({
 			var list = filtered();
 			if (!list.length)
 				return ctx.toast(_('Nothing to export'));
-			var lines = [ [ _('Type'), _('Number'), _('Name'), _('Date'), _('Duration (s)'), _('Result'), _('Network cause') ].map(csvCell).join(',') ];
+			var lines = [ [ _('Type'), _('Number'), _('Name'), _('Date'), _('Duration (s)'), _('Result'), _('Answered by'), _('Network cause') ].map(csvCell).join(',') ];
 			list.forEach(function(c) {
 				lines.push([ typeLabel(c.type), c.number, (c.name || ctx.nameFor(c.number)),
-					new Date(c.ts * 1000).toISOString(), c.durationSec, resultLabel(c.result), c.cause || '' ].map(csvCell).join(','));
+					new Date(c.ts * 1000).toISOString(), c.durationSec, resultLabel(c.result), answeredLabel(c.answeredBy),
+					c.cause || '' ].map(csvCell).join(','));
 			});
 			var blob = new Blob([ lines.join('\r\n') + '\r\n' ], { type: 'text/csv' });
 			var a = E('a', { 'href': URL.createObjectURL(blob), 'download': 'phone-calls.csv' });
@@ -449,8 +459,9 @@ return baseclass.extend({
 				chips.appendChild(E('button', { 'class': 'av-chip', 'type': 'button', 'aria-pressed': t === cat ? 'true' : 'false',
 					'click': function() { cat = t; redraw(); } }, [ typeLabel(t), E('span', { 'class': 'av-mut' }, String(count(t))) ]));
 			});
-			clearLbl.textContent = cat === 'ALL' ? _('Clear all') : cat === 'BLOCKED' ? _('Clear all') : _('Clear %s').format(typeLabel(cat).toLowerCase());
-			clearBtn.disabled = cat === 'BLOCKED';
+			clearLbl.textContent = cat === 'ALL' || cat === 'BLOCKED' || cat === 'ANSWERED'
+				? _('Clear all') : _('Clear %s').format(typeLabel(cat).toLowerCase());
+			clearBtn.disabled = cat === 'BLOCKED' || cat === 'ANSWERED';
 
 			var list = filtered();
 			rows.textContent = '';
@@ -500,7 +511,9 @@ return baseclass.extend({
 
 		return E('div', [ u.off([
 			chips,
-			E('div', { 'class': 'av-fl' }, [ search, from, exportBtn, clearBtn ]),
+			/* the row that finds a call is a panel of the page, not a strip laid over the wallpaper: it takes
+			   the same card the rest of the page is built out of, and the grid inside it stays this page's */
+			E('div', { 'class': 'av-fl cbi-section' }, [ search, from, exportBtn, clearBtn ]),
 			E('div', { 'class': 'av-split' }, [
 				E('div', { 'class': 'cbi-section av-list' }, [ rows, none ]),
 				detail

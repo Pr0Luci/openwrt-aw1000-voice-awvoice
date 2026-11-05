@@ -62,6 +62,7 @@ void calllog_add(struct calllog *l, const struct phone_call_record *rec, unsigne
 	e->duration_s = rec->answered_ms && rec->end_ms > rec->answered_ms ? (unsigned int)((rec->end_ms - rec->answered_ms) / 1000) : 0;
 	e->result = rec->result;
 	e->cause = rec->cause;
+	e->answered_by = rec->answered_by;
 	snprintf(e->recording, sizeof(e->recording), "%s", recording && recording[0] ? recording : "");
 	snprintf(e->message, sizeof(e->message), "%s", message && message[0] ? message : "");
 	l->ram_dirty = l->flash_dirty = 1;
@@ -106,6 +107,8 @@ static int write_file(const struct calllog *l, const char *path)
 			fprintf(f, ",\"recording\":\"%s\"", e->recording);
 		if (e->message[0])
 			fprintf(f, ",\"message\":\"%s\"", e->message);	/* the answering machine's: a call can carry both */
+		if (e->answered_by != PHONE_ANSWERED_NONE)
+			fprintf(f, ",\"answeredBy\":\"%s\"", phone_answered_by_name(e->answered_by));	/* who took it, when anyone did */
 		fprintf(f, "}%s\n", k + 1 < l->n ? "," : "");
 	}
 	fputs("]\n", f);
@@ -133,7 +136,7 @@ static void make_parent(const char *path)
 	}
 }
 
-/* the field after `"key":` in a record line of our own format; NULL when the key is not there */
+/* the field after `"key":` in a record line of this format; NULL when the key is not there */
 static const char *field(const char *line, const char *key)
 {
 	char pat[24];
@@ -198,6 +201,22 @@ static void text_opt(const char *line, const char *key, char *out, size_t cap)
 	}
 }
 
+/* the one who took the call, from the word the file carried; a missing or unknown word leaves none */
+static void answered_by_opt(const char *line, enum phone_answered_by *out)
+{
+	char text[12];
+
+	text_opt(line, "answeredBy", text, sizeof(text));
+	if (!strcmp(text, phone_answered_by_name(PHONE_ANSWERED_HANDSET)))
+		*out = PHONE_ANSWERED_HANDSET;
+	else if (!strcmp(text, phone_answered_by_name(PHONE_ANSWERED_MACHINE)))
+		*out = PHONE_ANSWERED_MACHINE;
+	else if (!strcmp(text, phone_answered_by_name(PHONE_ANSWERED_WEB)))
+		*out = PHONE_ANSWERED_WEB;
+	else if (!strcmp(text, phone_answered_by_name(PHONE_ANSWERED_SIP)))
+		*out = PHONE_ANSWERED_SIP;
+}
+
 static int parse_line(const char *line, struct calllog_entry *e)
 {
 	unsigned long long id, ts, dur, cause;
@@ -212,7 +231,8 @@ static int parse_line(const char *line, struct calllog_entry *e)
 		return 0;
 	text_opt(line, "recording", e->recording, sizeof(e->recording));	/* optional: recordings arrived after the log did */
 	text_opt(line, "message", e->message, sizeof(e->message));		/* and so did the answering machine */
-	c = field(line, "cause");		/* may be negative in principle; ours are not */
+	answered_by_opt(line, &e->answered_by);					/* and the one who took the call */
+	c = field(line, "cause");		/* may be negative in principle; the ones stored here are not */
 	if (!c)
 		return 0;
 	cause = (unsigned long long)strtoll(c, NULL, 10);

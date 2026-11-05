@@ -5,7 +5,7 @@
 
 /*
  * The fake chip and the fake modem of the host tests: the stage tool's (tools/slic/test_slic.c) and the daemon's
- * (packages/awvoice-phoned/tests/test_daemon.c) tests drive the same models.
+ * (tests/test_daemon.c) tests drive the same models.
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -48,9 +48,15 @@ struct model {
 	unsigned long lcr_origin;
 	int lcr_started;
 	unsigned int lcr_ms;			/* paused time per hook-script entry; 0 = LCR_SCRIPT_MS */
+	/* the chip's FSK buffer holds one byte at the signalling rate, so room for the next one appears a byte time after
+	 * the last went in; 0 = the buffer is free at once, as the tests that do not time a send expect */
+	unsigned int fsk_room_ms;
+	unsigned long room_due_ms[CHANNELS];	/* this channel's buffer reports room again from this paused time */
+	int room_pending[CHANNELS];
 	/* ordered record of the writes that are not part of the RAM window mechanics: 'm' RAM word, 'r' register */
 	struct { char kind; unsigned int ch, addr; uint32_t value; unsigned long at; } log[512];
 	unsigned int log_count;
+	unsigned int log_dropped;		/* writes the record could not hold: a test that reads the timeline must see this is zero */
 	unsigned int cal_busy_polls;	/* reads of the calibration status that still show busy after a start; 0 = done at once */
 	unsigned int cal_pending[2];
 	int cal_stuck;			/* the busy flag never clears */
@@ -63,6 +69,8 @@ struct model {
 	unsigned int ram_forced_addr;	/* read-back of this RAM word always shows ram_forced_value */
 	uint32_t ram_forced_value;
 	int lf_read_value;		/* the line feed register always reads back this state; -1 = it holds what was written */
+	int ring_trip_ms;		/* the chip's own ring trip: this long after a ring write the line feed reads forward active and RTP reads set; 0 = the burst runs */
+	unsigned long ring_at_ms;	/* when the ringing state was last written */
 	int dtmf_at;			/* the tone-detector event fires this many ms after the first hook read (the hold's start); 0 = none */
 	int flag_at;			/* the chip's loop-change flag latches this many ms after the first hook read, until register 19 is read; 0 = none */
 	int flag_set;
@@ -115,6 +123,7 @@ struct fake_modem {
 	int lost;			/* the port is gone: every pump answers -ENODEV */
 	unsigned int lose_after;	/* the port is lost when this many requests have been started; 0 = never */
 	int state_timeout;		/* the call list gets no answer (-ETIMEDOUT) */
+	int cause_stall;		/* the release cause request never completes (AT+CEER hangs) */
 	unsigned int begins, pumps;
 	struct call_leg legs[CALL_LEGS_MAX];	/* the voice calls the call list shows (the tests that use legs fill them with `poll`) */
 	unsigned int nlegs;

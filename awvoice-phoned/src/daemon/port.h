@@ -23,4 +23,18 @@
  */
 int port_find(const char *root, unsigned int iface, char *path, size_t cap);
 
+/*
+ * The voice port's other opener. phoned takes the tty with TIOCEXCL, so that a second opener is refused with EBUSY at
+ * once; a holder that did not set the flag is found by its open descriptor and named. Both checks run at start and
+ * on hotplug, never per step.
+ */
+
+/* Set TIOCEXCL on an open tty: 0, or -errno when the tty will not take it. */
+int port_exclusive(int fd);
+
+/* 1 and the holder's pid and command name (its comm, at most 15 characters) when a process other than self_pid has
+ * `path` open; 0 when none does. Reads <proc_root>/<pid>/fd links and <proc_root>/<pid>/comm only. -errno when the
+ * tree cannot be read, which is not a proof that the port is free. */
+int port_holder(const char *proc_root, const char *path, int self_pid, int *pid, char *comm, size_t cap);
+
 #endif /* AW_PHONED_PORT_H */

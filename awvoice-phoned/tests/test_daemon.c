@@ -18,14 +18,17 @@
 #include "alarm.h"
 #include "answer.h"
 #include "cid.h"
+#include "dnd.h"
 #include "forward.h"
 #include "blocking.h"
 #include "phonebook.h"
 #include "slic_map.h"
+#include "modemq.h"
 #include "stages.h"
 
 #define ACTS_MAX	32
 #define EVENTS_MAX	64
+#define CID_ROOM_MS	8			/* the chip's FSK buffer is ready for the next byte one byte time later: 8 ms at the 1200 baud signalling rate, start and stop bits included */
 
 static const int32_t steady[] = { 59000, 59000, 59000, 59000, 59000 };
 static const int32_t offhook[] = { 20000, 20000, 20000, 20000, 20000 };
@@ -40,17 +43,23 @@ struct rig {
 	size_t lsize;
 	struct fake_modem fm;
 	int listed;				/* what the modem's call list shows (enum call_state) */
+	int flash;				/* one-shot list value, for a poll that flickers (enum call_state) */
+	int flash_polls;			/* polls the flash value is still shown */
 	char acts[ACTS_MAX][56];		/* the commands the modem was given, in order */
 	unsigned int act_count;
 	struct call_ops ops;
 	struct phone_hooks hooks;
 	struct phone_cfg cfg;
+	struct dnd dnd;			/* the quiet hours this test writes */
 	struct phone *p;
 	unsigned long long now;
 	struct phone_event ev[EVENTS_MAX];
 	unsigned int ev_count;
 	struct phone_call_record rec[8];	/* the call log's records, in order */
 	unsigned int rec_count;
+	unsigned int bridge[8];		/* the flags each bridge start was given, in order */
+	unsigned int bridge_count;
+	int bridge_err;			/* what the next bridge start answers (0 = it took) */
 	struct tm clock;			/* the wall clock the alarms see */
 	int clock_ok;
 	int refuse_atd;				/* the modem answers ERROR to a dial */
@@ -65,7 +74,12 @@ static struct rig *the_rig;
 static int list_poll(void *user, int *st)
 {
 	(void)user;
-	*st = the_rig->listed;
+	if (the_rig->flash_polls > 0) {
+		the_rig->flash_polls--;
+		*st = the_rig->flash;
+	} else {
+		*st = the_rig->listed;
+	}
 	return 0;
 }
 
@@ -112,6 +126,18 @@ static void rig_ended(void *ctx, const struct phone_call_record *rec)
 	r->rec_count++;
 }
 
+static int rig_bridge_start(void *ctx, unsigned int modem_rx, unsigned int modem_tx, unsigned int line_rx,
+			    unsigned int line_tx, unsigned int flags)
+{
+	struct rig *r = ctx;
+
+	(void)modem_rx; (void)modem_tx; (void)line_rx; (void)line_tx;
+	if (r->bridge_count < 8)
+		r->bridge[r->bridge_count] = flags;
+	r->bridge_count++;
+	return r->bridge_err;
+}
+
 static const char *the_caller = "5551";
 
 static int caller_number(void *ctx, char *out, size_t cap)
@@ -140,9 +166,9 @@ static void rig_init(struct rig *r)
 	linefeed_model(&r->m, steady, 5, offhook, 5, NULL, 0);
 	r->log = open_memstream(&r->lbuf, &r->lsize);
 	r->listed = CALL_NONE;
-	r->fm = (struct fake_modem){ .poll = list_poll, .act = list_act };
+	r->fm = (struct fake_modem){ .poll = list_poll, .act = list_act, .user = r };
 	r->ops = (struct call_ops){ .ctx = &r->fm, .begin = fm_begin, .pump = fm_pump, .setup = 1, .ring = 1, .service_log = 1 };
-	r->hooks = (struct phone_hooks){ .ctx = r, .event = rig_event, .call_ended = rig_ended, .wall_clock = rig_wall_clock };
+	r->hooks = (struct phone_hooks){ .ctx = r, .bridge_start = rig_bridge_start, .event = rig_event, .call_ended = rig_ended, .wall_clock = rig_wall_clock };
 	r->ops.number = caller_number;
 	r->cfg = (struct phone_cfg){ .channel = TEST_CH, .service_log = 1 };
 }
@@ -193,6 +219,17 @@ static unsigned int acts_of(const struct rig *r, const char *cmd)
 
 	for (k = 0; k < r->act_count && k < ACTS_MAX; k++)
 		n += !strcmp(r->acts[k], cmd);
+	return n;
+}
+
+/* the same count for a command that carries its argument (AT+QDAI=x,...): the prefix is the point, the value is not */
+static unsigned int acts_starting(const struct rig *r, const char *prefix)
+{
+	unsigned int k, n = 0;
+	size_t len = strlen(prefix);
+
+	for (k = 0; k < r->act_count && k < ACTS_MAX; k++)
+		n += !strncmp(r->acts[k], prefix, len);
 	return n;
 }
 
@@ -481,6 +518,75 @@ static void test_hangup(void)
 	rig_close(&r);
 }
 
+/* the list flickers for one poll while the modem answers: the call is answered, not released */
+static void test_answer_flicker(void)
+{
+	struct rig r;
+	unsigned int k;
+
+	rig_init(&r);
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1500);
+	assert(status_of(&r).line == PHONE_LINE_RINGING);
+	handset(&r, 1);			/* the ring trip answers */
+	r.flash = CALL_NONE;		/* the poll right after ATA lists no call */
+	r.flash_polls = 1;
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 3000);
+	/* the answered call survives the snapshot; the front end's release rule is test_front_end's business */
+	assert(status_of(&r).line == PHONE_LINE_CALL && status_of(&r).call == CALL_ACTIVE);
+	assert(acts_of(&r, "AT+CHUP") == 0);
+	/* no event may carry the call as gone: the front end reads that as a release */
+	for (k = 0; k < r.ev_count && k < EVENTS_MAX; k++)
+		assert(!(r.ev[k].kind == PHONE_EV_CALL && r.ev[k].call == CALL_NONE));
+	rig_close(&r);
+}
+
+/* a release tone still plays when AT+CEER never answers, and a released call is not hung up twice */
+static void test_release_tone_fallback(void)
+{
+	struct rig r;
+
+	rig_init(&r);
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1500);
+	handset(&r, 1);
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 2500);
+	assert(status_of(&r).line == PHONE_LINE_CALL);
+	r.fm.cause_stall = 1;			/* AT+CEER never answers: the tone must not wait forever */
+	r.listed = CALL_GONE;
+	run_ms(&r, 2200);
+	assert(status_of(&r).line == PHONE_LINE_RELEASE);
+	assert(count_in(log_text(&r), "the release cause did not come: the busy tone") == 1);
+	assert(phone_hangup(r.p) == -ENOENT);	/* the network already released the call */
+	assert(acts_of(&r, "AT+CHUP") == 0);
+	rig_close(&r);
+}
+
+/* the list drops a call the handset was on without a gone step: the line still hears the release tone */
+static void test_release_tone_none(void)
+{
+	struct rig r;
+
+	rig_init(&r);
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1500);
+	handset(&r, 1);
+	r.fm.cause = cause_busy;
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 2500);
+	assert(status_of(&r).line == PHONE_LINE_CALL);
+	r.listed = CALL_NONE;			/* the modem simply stops listing the call */
+	run_ms(&r, 2500);
+	assert(status_of(&r).line == PHONE_LINE_RELEASE);
+	assert(count_in(log_text(&r), "the remote ended the call (cause 17), the busy tone") == 1);
+	rig_close(&r);
+}
+
 /* a call's course reaches the front end as events, and an event has no place for a number */
 static void test_events(void)
 {
@@ -644,6 +750,30 @@ static void test_ring_trip_answers_at_once(void)
 }
 
 /*
+ * The chip's own ring trip without a lift: its ring trip circuit fired on the current the line's load draws, not on
+ * a handset going off hook, so it left the ringing state and no further burst follows. The daemon says the cause and
+ * stops the ring; the call stays offered, and the handset still answers it.
+ */
+static void test_ring_trip_without_lift(void)
+{
+	struct rig r;
+
+	rig_init(&r);
+	r.m.ring_trip_ms = 120;				/* the chip's trip fires this long into the first burst */
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 500);
+	assert(count_in(log_text(&r), "hook register 0x00 -> 0x01 while ringing (the chip's ring trip)") == 1);
+	assert(count_in(log_text(&r), "ring stopped (the chip tripped the ring before any lift)") == 1);
+	assert(status_of(&r).line != PHONE_LINE_RINGING);
+	assert(acts_of(&r, "ATA") == 0);
+	handset(&r, 1);						/* the caller answers the call that is still offered */
+	run_ms(&r, 100);
+	assert(acts_of(&r, "ATA") == 1);
+	rig_close(&r);
+}
+
+/*
  * A caller id sent between the bursts leaves the line in the pause, not in a fresh burst: the chip starts ringing as
  * soon as the line enters that state, and a phone that is still working the message out is rung in the same breath as
  * the last byte (reported on the line 2026-10-29 as a garbled display). The line is held silent for what is left of
@@ -652,9 +782,13 @@ static void test_ring_trip_answers_at_once(void)
 static void test_cid_holds_the_pause(void)
 {
 	struct rig r;
-	unsigned int mark;
+	unsigned int mark, k, burst1 = 0, burst2 = 0, send_end = 0;
+	unsigned long long promised = 0;
+	const char *rest;
+	unsigned long long waited;
 
 	rig_init(&r);
+	r.m.fsk_room_ms = CID_ROOM_MS;		/* the message goes out at the signalling rate, as it does on the line */
 	r.ops.cid = CID_BELLCORE;		/* the data goes out after the first burst; the model shows no burst phase */
 	the_caller = "712345678";		/* the network's national significant number: the display wants the trunk 0 */
 	rig_open(&r);
@@ -676,6 +810,179 @@ static void test_cid_holds_the_pause(void)
 	run_ms(&r, 2000);			/* the pause's end plus a little: the burst is back */
 	assert(count_in(log_text(&r), "ring started (after the caller id)") == 1);
 	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 2);
+
+	/* the rest the log promises is the rest the phone gets: counted from the message's last byte, not from the
+	 * moment its send began (a step that blocks for some hundreds of milliseconds is over by the time it asks) */
+	assert(r.m.log_dropped == 0);
+	for (k = mark; k < r.m.log_count; k++) {
+		if (r.m.log[k].kind != 'r' || r.m.log[k].addr != REG_LINEFEED)
+			continue;
+		if (!send_end && r.m.log[k].value == LF_CODE_FWD_ACTIVE)
+			send_end = r.m.log[k].at;	/* the message's last write: the line feed put back at its end */
+		else if (r.m.log[k].value == LF_CODE_RING && send_end && !burst2)
+			burst2 = r.m.log[k].at;
+		else if (r.m.log[k].value == LF_CODE_RING && !burst1)
+			burst1 = r.m.log[k].at;
+	}
+	assert(burst1 && burst2 && send_end);
+	rest = strstr(log_text(&r), "the ring rests ");
+	assert(rest && sscanf(rest, "the ring rests %llu ms", &promised) == 1);
+	waited = burst2 - send_end;
+	/* the wait is only looked at in the ring supervision, which runs every RING_POLL_MS */
+	assert(waited >= promised && waited <= promised + RING_POLL_MS);
+	rig_close(&r);
+	the_caller = "5551";
+}
+
+/*
+ * A caller id sent before the first ring keeps its silence. The placement puts the message in the quiet before the
+ * first burst and leaves the phone its time to work the framing out to the end, so the ring voltage waits
+ * CID_PRERING_GAP_MS after the message's last byte -- the same silence floor the data between the bursts is held to
+ * (slic_map.h). The message is longer than that gap: the seizure, the mark and the bytes at 1200 baud come to some
+ * 700 ms here, so a gap counted from the moment the send began has run out before the last byte leaves the line and the
+ * burst follows it with no silence at all (reported 2026-10-29 and measured again on the line 2026-11-02: the first
+ * burst 1 ms after "caller id sent").
+ */
+static void test_cid_prering_keeps_its_gap(void)
+{
+	struct rig r;
+	unsigned int mark, k, burst = 0, last_write = 0, first_byte = 0, last_byte = 0;
+	int seen = 0;
+
+	rig_init(&r);
+	r.m.fsk_room_ms = CID_ROOM_MS;		/* the fake chip's buffer takes a byte at the signalling rate, as the real one does */
+	r.cfg.cid_prering = 1;
+	r.ops.cid = CID_BELLCORE;		/* the same FSK message, only placed before the first burst */
+	the_caller = "712345678";
+	rig_open(&r);
+	mark = r.m.log_count;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 2000);
+	assert(r.m.log_dropped == 0);		/* the timeline read below has to hold every write */
+	assert(count_in(log_text(&r), "caller id sent") == 1);		/* once, before the ring: the gap does not leave a second send */
+	assert(count_in(log_text(&r), "the caller id goes out before the first ring") == 1);
+	assert(status_of(&r).line == PHONE_LINE_RINGING);
+
+	/* the message's bytes and the first burst, in the order the chip was given them */
+	for (k = mark; k < r.m.log_count; k++) {
+		if (r.m.log[k].kind != 'r')
+			continue;
+		if (r.m.log[k].addr == REG_LINEFEED && r.m.log[k].value == LF_CODE_RING) {
+			burst = k;
+			break;
+		}
+		last_write = r.m.log[k].at;	/* the send's last write: the line feed put back after the drain */
+		if (r.m.log[k].addr == REG_FSKDAT) {
+			if (!seen) {
+				first_byte = r.m.log[k].at;
+				seen = 1;
+			}
+			last_byte = r.m.log[k].at;
+		}
+	}
+	assert(seen && burst && last_write);
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 1);	/* nothing rang while the message went out */
+
+	/* the trap itself: the message alone takes longer than the silence it is owed */
+	assert(last_byte - first_byte >= CID_PRERING_GAP_MS);
+	/* the silence counts from the end of the message: the burst is not earlier than CID_PRERING_GAP_MS after the
+	 * send's last write, and the wait is only looked at in the ring supervision, which runs every RING_POLL_MS */
+	assert(r.m.log[burst].at >= last_write + CID_PRERING_GAP_MS);
+	assert(r.m.log[burst].at <= last_write + CID_PRERING_GAP_MS + RING_POLL_MS);
+	rig_close(&r);
+	the_caller = "5551";
+}
+
+/*
+ * The silence a pre-ring caller id keeps is a moment the handset can answer in: the identity is on the line and the
+ * ring voltage is not. A lift inside the gap takes the call and no burst ever goes out -- the wait is cleared with the
+ * ring. This window only exists with the gap kept: counted from the send's start it was already over, so the burst was
+ * on the line before anything could be lifted.
+ */
+static void test_cid_prering_gap_answers(void)
+{
+	struct rig r;
+	unsigned int mark;
+
+	rig_init(&r);
+	r.m.fsk_room_ms = CID_ROOM_MS;
+	r.cfg.cid_prering = 1;
+	r.ops.cid = CID_BELLCORE;
+	the_caller = "712345678";
+	rig_open(&r);
+	mark = r.m.log_count;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 60);				/* one step of the loop carries the whole message: the line is now in its silence */
+	assert(count_in(log_text(&r), "caller id sent") == 1);
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 0);
+	handset(&r, 1);				/* lifted in the silence */
+	run_ms(&r, 30);
+	assert(count_in(log_text(&r), "ring stopped (the handset was lifted)") == 1);
+	assert(acts_of(&r, "ATA") == 1);
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 0);
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 3000);			/* the gap and its supervision are long over */
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 0);
+	assert(status_of(&r).line == PHONE_LINE_CALL && status_of(&r).dir == PHONE_DIR_IN);
+	rig_close(&r);
+	the_caller = "5551";
+}
+
+/*
+ * The answering machine's delay can fall in the same silence: it answers what the handset never heard ring, and the
+ * burst the wait was holding back never comes. The identity still reached the line before the answer.
+ */
+static void test_cid_prering_gap_serves_the_machine(void)
+{
+	struct rig r;
+	unsigned int mark;
+
+	rig_init(&r);
+	r.m.fsk_room_ms = CID_ROOM_MS;
+	r.cfg.cid_prering = 1;
+	r.cfg.machine = 1;
+	r.cfg.machine_delay_ms = 900;		/* inside the gap: the message ends at some 770 ms, the burst would be due 600 ms later */
+	r.ops.cid = CID_BELLCORE;
+	the_caller = "712345678";
+	rig_open(&r);
+	mark = r.m.log_count;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 2000);
+	assert(count_in(log_text(&r), "caller id sent") == 1);
+	assert(count_in(log_text(&r), "the answering machine answers (") == 1);
+	assert(acts_of(&r, "ATA") == 1);
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 0);	/* the phone was never rung */
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 1500);
+	assert(status_of(&r).machine == PHONE_MACHINE_ANSWERED && status_of(&r).line == PHONE_LINE_CALL);
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 0);
+	rig_close(&r);
+	the_caller = "5551";
+}
+
+/*
+ * A caller id that never leaves the chip does not hold the line: the buffer refusing a byte past the driver's
+ * patience ends the send with an error, the identity is logged as failed, and the phone still rings -- after the same
+ * silence, because a message that went halfway still occupied the line.
+ */
+static void test_cid_prering_a_failed_send_still_rings(void)
+{
+	struct rig r;
+	unsigned int mark;
+
+	rig_init(&r);
+	r.m.fsk_room_ms = 500;		/* the buffer reports room long after the driver's patience: the first byte times out */
+	r.cfg.cid_prering = 1;
+	r.ops.cid = CID_BELLCORE;
+	the_caller = "712345678";
+	rig_open(&r);
+	mark = r.m.log_count;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 2000);
+	assert(count_in(log_text(&r), "caller id failed") == 1);
+	assert(count_in(log_text(&r), "caller id sent") == 0);
+	assert(writes_of(&r, mark, REG_LINEFEED, LF_CODE_RING) == 1);	/* the phone still rings: a failed identity is not a dead line */
+	assert(status_of(&r).line == PHONE_LINE_RINGING);
 	rig_close(&r);
 	the_caller = "5551";
 }
@@ -697,6 +1004,38 @@ static void test_cid_display_number(void)
 	r.listed = CALL_INCOMING;
 	run_ms(&r, 3300);			/* the ring, the caller id and the rest of the pause */
 	assert(count_in(log_text(&r), "caller id, number '0712345678'") == 1);
+	rig_close(&r);
+	the_caller = "5551";
+}
+
+/*
+ * A caller from another country: the handset is given the number in the form it can dial back -- the international
+ * prefix and the country code, not the plus, because the caller-id message carries digits alone and a plus would drop
+ * out of it silently. What the network reported, plus and all, is what the call record keeps, and that is the form the
+ * page shows, where a plus can be printed (numbers.h holds why the two forms differ).
+ */
+static void test_cid_foreign_number_forms(void)
+{
+	struct rig r;
+
+	rig_init(&r);
+	r.ops.service_log = 0;
+	r.cfg.service_log = 0;
+	r.ops.cid = CID_BELLCORE;
+	the_caller = "+447700900123";		/* the network reports the international form (TS 24.008 type 145) */
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3300);			/* the ring, the caller id and the rest of the pause */
+	assert(count_in(log_text(&r), "caller id, number '00447700900123'") == 1);
+	assert(strstr(log_text(&r), "caller id, number '+") == NULL);	/* no plus reaches the line: only the digits the message can hold */
+	handset(&r, 1);
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 2000);
+	r.listed = CALL_GONE;
+	run_ms(&r, 1200);
+	r.listed = CALL_NONE;
+	run_ms(&r, 1500);
+	assert(r.rec_count == 1 && !strcmp(r.rec[0].number, "+447700900123"));
 	rig_close(&r);
 	the_caller = "5551";
 }
@@ -726,6 +1065,40 @@ static unsigned int machine_events(const struct rig *r, int why)
 	return n;
 }
 
+/* what the line last asked about quiet hours (the code the handset dialled), -1 when it never asked */
+static int dnd_event_of(const struct rig *r)
+{
+	int got = -1;
+	unsigned int k;
+
+	for (k = 0; k < r->ev_count && k < EVENTS_MAX; k++)
+		if (r->ev[k].kind == PHONE_EV_DND)
+			got = r->ev[k].manual;
+	return got;
+}
+
+/* the verdict carried by the event that announces a listed incoming call: a front end invites its own phones to ring
+ * on that event, so the answer has to travel with it (-1 when no call was announced) */
+static int ring_event_quiet(const struct rig *r)
+{
+	int got = -1;
+	unsigned int k;
+
+	for (k = 0; k < r->ev_count && k < EVENTS_MAX; k++)
+		if (r->ev[k].kind == PHONE_EV_CALL && r->ev[k].call == CALL_INCOMING)
+			got = r->ev[k].quiet;
+	return got;
+}
+
+static unsigned int call_events(const struct rig *r)
+{
+	unsigned int k, n = 0;
+
+	for (k = 0; k < r->ev_count && k < EVENTS_MAX; k++)
+		n += r->ev[k].kind == PHONE_EV_CALL;
+	return n;
+}
+
 static void test_machine_answer(void)
 {
 	struct rig r;
@@ -738,6 +1111,7 @@ static void test_machine_answer(void)
 	r.listed = CALL_INCOMING;
 	run_ms(&r, 6000);
 	assert(acts_of(&r, "ATA") == 0 && status_of(&r).machine == PHONE_MACHINE_NONE && status_of(&r).line == PHONE_LINE_RINGING);
+	assert(ring_event_quiet(&r) == 0);		/* nothing holds this call quiet: the ring event carries that answer too */
 	assert(count_in(log_text(&r), "the answering machine") == 0);
 	rig_close(&r);
 
@@ -746,7 +1120,9 @@ static void test_machine_answer(void)
 	r.listed = CALL_INCOMING;
 	run_ms(&r, 1200);
 	assert(acts_of(&r, "ATA") == 1 && count_in(log_text(&r), "the answering machine answers (") == 1);
-	assert(status_of(&r).machine == PHONE_MACHINE_ANSWERING && status_of(&r).line == PHONE_LINE_IDLE);
+	/* the answer is on its way: the ring has stopped, but the line is not idle (an idle here reads as a release
+	 * to a front end, which then hung the call up) */
+	assert(status_of(&r).machine == PHONE_MACHINE_ANSWERING && status_of(&r).line == PHONE_LINE_RINGING);
 	assert(count_in(log_text(&r), "the phone rings for the incoming call") == 0 && machine_events(&r, PHONE_MACHINE_ANSWERING) == 1);
 	r.listed = CALL_ACTIVE;
 	run_ms(&r, 1500);			/* the call list catches up */
@@ -916,9 +1292,18 @@ static void test_modem_timeouts(void)
 
 /* the idle questions to the modem: the answers reach the status, nothing is asked in a call, and an answered call says under which radio conditions */
 static unsigned int asked[8];
+/* one full round of the read-only questions, plus a step: a value the modem changed is only seen when the cycle
+ * comes round to that question again (the list is the daemon's, so the window is too) */
+static unsigned int full_cycle_ms(void)
+{
+	return INFO_EVERY_MS * modemq_count + INFO_EVERY_MS;
+}
+
 static const char *cereg_reply = "+CEREG: 0,1\r\n\r\nOK\r\n";
 static const char *qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";	/* as captured on the router: the second field 1 = slave */
 static const char *clvl_range_reply = "+CLVL: (0-5)\r\n\r\nOK\r\n";
+static const char *qnwinfo_reply = "+QNWINFO: \"FDD LTE\",\"41302\",\"LTE BAND 3\",1725\r\n\r\nOK\r\n";	/* as captured on the router: the PLMN in digits */
+static const char *cops_reply = "+COPS: 0,3,\"Dialog Dialog\",7\r\n\r\nOK\r\n";	/* this modem answers the standard read with a name, not the digits */
 
 static const char *modem_text(void *user, const char *cmd)
 {
@@ -930,7 +1315,8 @@ static const char *modem_text(void *user, const char *cmd)
 	if (!strncmp(cmd, "AT+QCFG", 7)) { asked[2]++; return "+QCFG: \"ims\",0,1\r\n\r\nOK\r\n"; }
 	if (!strcmp(cmd, "AT+QCSQ")) { asked[3]++; return "+QCSQ: \"LTE\",-62,-93,8,-11\r\n\r\nOK\r\n"; }
 	if (!strcmp(cmd, "AT+CLIR?")) return "AT+CLIR?\r\r\n+CLIR: 1,4\r\n\r\nOK\r\n";
-	if (!strcmp(cmd, "AT+QNWINFO")) { asked[4]++; return "+QNWINFO: \"FDD LTE\",\"41302\",\"LTE BAND 3\",1725\r\n\r\nOK\r\n"; }
+	if (!strcmp(cmd, "AT+QNWINFO")) { asked[4]++; return qnwinfo_reply; }
+	if (!strcmp(cmd, "AT+COPS?")) { asked[5]++; return cops_reply; }
 	return "";
 }
 
@@ -953,6 +1339,11 @@ static void test_idle_questions(void)
 	assert(st.sim_ready == 1 && st.registered == 1 && st.ims_registered == 1 && st.signal_dbm == -93 && !strcmp(st.network, "4G"));
 	for (k = 0; k < 5; k++)
 		assert(asked[k] >= 1);
+	/* the cycle goes on to the network identity: the standard read gave a name here, so the digits come from the
+	 * modem's own query, and no warning line belongs in a log where a code was read */
+	run_ms(&r, 12000);
+	assert(asked[5] >= 1 && !strcmp(status_of(&r).mcc, "413"));
+	assert(count_in(log_text(&r), "no digits to choose a numbering plan") == 0);
 
 	/* none while the handset is up or a call is going on */
 	for (before = 0, k = 0; k < 5; k++)
@@ -992,6 +1383,58 @@ static void with_questions(struct rig *r)
 	r->ops.body = fm_body;
 	r->fm.text = modem_text;
 }
+
+/*
+ * Which reply the network's three digits come from, and what is said when neither carries them. The standard read can
+ * answer with the operator's name instead of the numeric form that was asked for; the modem's own query then carries the
+ * PLMN, and when neither does, the line says so once, because the numbering plan stays as it was set.
+ */
+static void test_network_identity_reads(void)
+{
+	struct rig r;
+
+	/* only the standard read has the digits: the vendor query naming a text operator changes nothing */
+	cops_reply = "+COPS: 0,0,\"41301\",7\r\n\r\nOK\r\n";
+	qnwinfo_reply = "+QNWINFO: \"FDD LTE\",\"SL-Mobitel\",\"LTE BAND 3\",1725\r\n\r\nOK\r\n";
+	rig_init(&r);
+	with_questions(&r);
+	rig_open(&r);
+	run_ms(&r, full_cycle_ms());
+	assert(!strcmp(status_of(&r).mcc, "413"));
+	assert(!status_of(&r).netname[0]);		/* the digits came, so there is no name to show beside them */
+	assert(count_in(log_text(&r), "no digits to choose a numbering plan") == 0);
+	rig_close(&r);
+
+	/* neither carries digits: said once, in the modem's own words, and nothing is read into the status */
+	cops_reply = "+COPS: 0,3,\"Dialog Dialog\",7\r\n\r\nOK\r\n";
+	qnwinfo_reply = "+QNWINFO: \"FDD LTE\",\"Dialog Dialog\",\"LTE BAND 3\",1725\r\n\r\nOK\r\n";
+	rig_init(&r);
+	with_questions(&r);
+	rig_open(&r);
+	run_ms(&r, 4 * full_cycle_ms());
+	assert(!status_of(&r).mcc[0]);
+	assert(!strcmp(status_of(&r).netname, "Dialog Dialog"));		/* the network's own word still reaches the page */
+	assert(count_in(log_text(&r), "the modem names its network 'Dialog Dialog': no digits to choose a numbering plan") == 1);
+	rig_close(&r);
+
+	/* off the network and back on it: the words are said again for the new one, not once per boot */
+	cops_reply = "+COPS: 0,3,\"Mobilink\",7\r\n\r\nOK\r\n";
+	qnwinfo_reply = "+QNWINFO: \"FDD LTE\",\"Mobilink\",\"LTE BAND 3\",1725\r\n\r\nOK\r\n";
+	cereg_reply = "+CEREG: 0,0\r\n\r\nOK\r\n";
+	rig_init(&r);
+	with_questions(&r);
+	rig_open(&r);
+	run_ms(&r, 2 * full_cycle_ms());
+	assert(!status_of(&r).mcc[0]);
+	cereg_reply = "+CEREG: 0,1\r\n\r\nOK\r\n";
+	run_ms(&r, 2 * full_cycle_ms());
+	assert(count_in(log_text(&r), "no digits to choose a numbering plan") == 1);
+	rig_close(&r);
+	cereg_reply = "+CEREG: 0,1\r\n\r\nOK\r\n";
+	cops_reply = "+COPS: 0,3,\"Dialog Dialog\",7\r\n\r\nOK\r\n";
+	qnwinfo_reply = "+QNWINFO: \"FDD LTE\",\"41302\",\"LTE BAND 3\",1725\r\n\r\nOK\r\n";
+}
+
 
 /* 1. a key pressed in a call goes to the network as AT+VTS (3GPP TS 27.007), in order, and a key that finds the queue full is dropped with one line and no digit */
 static void test_dtmf_in_call(void)
@@ -1056,6 +1499,28 @@ static void dial_45(struct rig *r)
 	r->m.dtmf_events[1].at = 900; r->m.dtmf_events[1].code = 0x05;
 	r->m.dtmf_events[2].at = 1200; r->m.dtmf_events[2].code = 0x0c;
 	r->m.dtmf_event_count = 3;
+}
+
+/* an outgoing attempt the list drops without a gone step: the handset hears the release tone, not silence */
+static void test_release_tone_none_outgoing(void)
+{
+	struct rig r;
+
+	rig_init(&r);
+	dial_45(&r);
+	r.fm.cause = cause_busy;
+	rig_open(&r);
+	handset(&r, 1);
+	run_ms(&r, 1500);
+	r.listed = CALL_ALERTING;
+	run_ms(&r, 2500);
+	assert(status_of(&r).line == PHONE_LINE_SETUP);
+	r.listed = CALL_NONE;			/* the network drops the attempt before the answer */
+	run_ms(&r, 1500);
+	assert(status_of(&r).line == PHONE_LINE_RELEASE);
+	assert(count_in(log_text(&r), "released before the answer (cause 17), the busy tone") == 1);
+	assert(acts_of(&r, "AT+CHUP") == 0);	/* the network already ended it: nothing is hung up */
+	rig_close(&r);
 }
 
 static void test_call_records(void)
@@ -1198,6 +1663,19 @@ static void press(struct rig *r, const char *keys)
 	r->m.dtmf_event_count = k;
 }
 
+/* keys pressed from base_ms on, at the spacing the other presses use: the line's clock has moved on since the first */
+static void press_after(struct rig *r, unsigned int base_ms, const char *keys)
+{
+	unsigned int k;
+
+	for (k = 0; keys[k]; k++) {
+		r->m.dtmf_events[k].at = base_ms + 300 * k;
+		r->m.dtmf_events[k].code = keys[k] == '#' ? 0x0c : keys[k] == '*' ? 0x0b : keys[k] == '0' ? 0x0a : (uint8_t)(keys[k] - '0');
+	}
+	r->m.dtmf_event_count = k;
+	r->m.dtmf_next = 0;
+}
+
 static const char *dialled(struct rig *r, const char *keys, const struct phonebook *book, const struct number_region *region)
 {
 	static char got[24];
@@ -1226,12 +1704,12 @@ static void test_speed_dial(void)
 	const char *ann[] = { "0777:mobile", "0999:home" };
 	const char *toolong[] = { "123456789012345678901234567890" };
 	static const char *const own[] = { "05", NULL };
-	const struct number_region special = { "XX", "1", "1", "011", own };
+	const struct number_region special = { "XX", "1", "1", "011", own, 0, NULL };
 
 	assert(pb);
 	phonebook_clear(pb, NULL);
-	assert(phonebook_add(pb, "Ann", ann, 2, "05", NULL) == 0);
-	assert(phonebook_add(pb, "Long", toolong, 1, "09", NULL) == 0);
+	assert(phonebook_add(pb, "Ann", ann, 2, "05", 0, NULL) == 0);
+	assert(phonebook_add(pb, "Long", toolong, 1, "09", 0, NULL) == 0);
 	assert(!strcmp(dialled(&r, "05#", pb, NULL), "ATD0777;"));		/* the first number of the contact */
 	assert(!strcmp(dialled(&r, "05", pb, NULL), "ATD05;"));			/* without the send key: an ordinary number, after the pause */
 	assert(!strcmp(dialled(&r, "06#", pb, NULL), "ATD06;"));		/* no such code: the digits as pressed */
@@ -1374,7 +1852,7 @@ static void test_clir(void)
 	assert(st.clir == PHONE_UNKNOWN && st.clir_status == PHONE_UNKNOWN);	/* nothing read back yet */
 	run_ms(&r, 20000);
 	st = status_of(&r);
-	assert(st.clir == 1 && st.clir_status == 4);				/* what the modem answered, not what we wrote */
+	assert(st.clir == 1 && st.clir_status == 4);				/* what the modem answered, not what was written here */
 	/* a changed setting is written at once when the line is idle; the same setting is not written again */
 	c2 = r.cfg;
 	assert(phone_set_cfg(r.p, &c2) == 0);
@@ -1410,6 +1888,15 @@ static void test_service_codes(void)
 	assert(!strcmp(dialled(&r, "45#", NULL, NULL), "ATD45;"));		/* the send key still works for a number */
 	assert(!strcmp(dialled(&r, "4*5#", NULL, NULL), "ATD45;"));		/* a star inside a number is dropped as before */
 	assert(!strcmp(dialled(&r, "#", NULL, NULL), ""));			/* a lone # dials nothing: it starts a service code */
+	/* the line's own quiet-hours codes: answered here, never sent on */
+	assert(!strcmp(dialled(&r, "*78", NULL, NULL), ""));
+	assert(!strcmp(dialled(&r, "*78#", NULL, NULL), ""));
+	assert(!strcmp(dialled(&r, "*79", NULL, NULL), ""));
+	assert(!strcmp(dialled(&r, "*79#", NULL, NULL), ""));
+	/* a code of the network that begins the same way is still the network's */
+	assert(!strcmp(dialled(&r, "*781234#", NULL, NULL), "ATD*781234#;"));
+	assert(!strcmp(dialled(&r, "*799#", NULL, NULL), "ATD*799#;"));
+	assert(!strcmp(dialled(&r, "78#", NULL, NULL), "ATD78;"));		/* digits alone are an ordinary number */
 	/* blocking looks behind the code */
 	rig_init(&r);
 	press(&r, "#31#45");
@@ -2168,6 +2655,7 @@ static void test_hold_and_second_call(void)
 	legs_are(&r, CALL_NONE, 0, 0, 0);
 	run_ms(&r, 1500);
 	assert(r.rec_count == 2 && !strcmp(r.rec[1].number, "5551") && r.rec[1].result == PHONE_RES_ANSWERED);
+	assert(r.rec[1].answered_by == PHONE_ANSWERED_HANDSET);	/* the held record keeps the door that answered it */
 	assert(!strstr(log_text(&r), "5551") && !strstr(log_text(&r), "ATD"));
 	rig_close(&r);
 
@@ -2474,12 +2962,13 @@ static void test_no_service(void)
 	cereg_reply = "+CEREG: 0,2\r\n\r\nOK\r\n";			/* searching */
 	rig_init(&r);
 	with_questions(&r);
-	r.m.dtmf_events[0].at = 17000; r.m.dtmf_events[0].code = 0x01;
-	r.m.dtmf_events[1].at = 17100; r.m.dtmf_events[1].code = 0x0c;
-	r.m.dtmf_event_count = 2;
 	rig_open(&r);
-	run_ms(&r, 14000);
+	run_ms(&r, full_cycle_ms());
 	assert(status_of(&r).registered == 0 && status_of(&r).modem_up);
+	/* the keys are pressed after this lift: the fake counts them from its first hook read, so their times are taken off its own clock */
+	r.m.dtmf_events[0].at = r.m.vtime_ms + 200; r.m.dtmf_events[0].code = 0x01;
+	r.m.dtmf_events[1].at = r.m.vtime_ms + 300; r.m.dtmf_events[1].code = 0x0c;
+	r.m.dtmf_event_count = 2;
 	handset(&r, 1);
 	run_ms(&r, 100);
 	assert(status_of(&r).line == PHONE_LINE_NO_SERVICE);
@@ -2491,7 +2980,7 @@ static void test_no_service(void)
 
 	/* registered again: the dial tone is back for a lifted handset, and for one that was waiting in the no-service tone */
 	cereg_reply = "+CEREG: 0,1\r\n\r\nOK\r\n";
-	run_ms(&r, 14000);
+	run_ms(&r, full_cycle_ms());
 	assert(status_of(&r).registered == 1);
 	handset(&r, 1);
 	run_ms(&r, 100);
@@ -2499,13 +2988,13 @@ static void test_no_service(void)
 	handset(&r, 0);
 	run_ms(&r, 600);
 	cereg_reply = "+CEREG: 0,0\r\n\r\nOK\r\n";
-	run_ms(&r, 14000);
+	run_ms(&r, full_cycle_ms());
 	handset(&r, 1);
 	run_ms(&r, 100);
 	assert(status_of(&r).line == PHONE_LINE_NO_SERVICE);
 	cereg_reply = "+CEREG: 0,5\r\n\r\nOK\r\n";			/* roaming counts as service */
 	r.listed = CALL_NONE;
-	run_ms(&r, 14000);
+	run_ms(&r, full_cycle_ms());
 	assert(status_of(&r).registered == 1 && status_of(&r).line == PHONE_LINE_DIAL_TONE);	/* it came back under the handset */
 	cereg_reply = "+CEREG: 0,1\r\n\r\nOK\r\n";
 	rig_close(&r);
@@ -2542,7 +3031,117 @@ static void test_audio_check(void)
 	rig_close(&r);
 }
 
-/* 4. the call list is asked for every 250 ms while a call is being set up, while our hang-up is pending and for 2 s after an answer; every second otherwise */
+/* 4. the HD setting never moves the hardware on its word: the line chip's band, the PCM slots and the bridge are one
+ *    layout, and the core asks for it only after the modem itself has answered with the rate the setting wants */
+static void test_hd_layout_waits_for_the_modem(void)
+{
+	struct rig r;
+	struct phone_cfg next;
+	int want = -1;
+
+	rig_init(&r);
+	with_questions(&r);
+	rig_open(&r);
+	assert(r.bridge_count == 1 && r.bridge[0] == 0);				/* the line came up narrowband */
+
+	qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";			/* the modem is at 8 kHz */
+	run_ms(&r, 3000);
+	next = r.cfg;
+	next.hd = 1;
+	assert(phone_set_cfg(r.p, &next) == 0);
+	run_ms(&r, 4000);
+	assert(acts_starting(&r, "AT+QDAI=") == 1);					/* the rate was written and the modem restarted for it */
+	assert(acts_of(&r, "AT+CFUN=1,1") >= 1);
+	assert(r.bridge_count == 1);							/* nothing of the local layout moved on the setting's word */
+	assert(!(r.m.reg[TEST_CH][0x2C] & 0x0C) && !(r.m.reg[TEST_CH][0x2F] & 0x01));	/* the chip's band is still narrowband: no half-change */
+	assert(phone_layout_due(r.p, &want) == 0);
+
+	qdai_reply = "+QDAI: x,1,0,4,0,1,1,1\r\n\r\nOK\r\n";			/* the modem answers 16 kHz: now the layout is owed */
+	run_ms(&r, 15000);
+	assert(phone_layout_due(r.p, &want) == 1 && want == 1);
+	assert(!(r.m.reg[TEST_CH][0x2C] & 0x0C) && !(r.m.reg[TEST_CH][0x2F] & 0x01));	/* the core still writes no register itself */
+	assert(r.bridge_count == 1);							/* bringing the line up again is the daemon's work, not the core's */
+	rig_close(&r);
+	qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";
+}
+
+/* the same setting on a modem that already keeps that rate: the line is brought up without touching the modem at all */
+static void test_hd_layout_already_confirmed(void)
+{
+	struct rig r;
+	struct phone_cfg next;
+	int want = -1;
+
+	qdai_reply = "+QDAI: x,1,0,4,0,1,1,1\r\n\r\nOK\r\n";			/* the modem's own setting persisted: 16 kHz */
+	rig_init(&r);
+	with_questions(&r);
+	rig_open(&r);							/* the hardware was brought up narrowband, as every start does */
+	next = r.cfg;
+	next.hd = 1;
+	assert(phone_set_cfg(r.p, &next) == 0);
+	run_ms(&r, 4000);
+	assert(phone_layout_due(r.p, &want) == 1 && want == 1);
+	assert(acts_starting(&r, "AT+QDAI=") == 0);					/* no rate write, no modem restart, no dropped data */
+	assert(acts_of(&r, "AT+CFUN=1,1") == 0);
+	rig_close(&r);
+	qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";
+}
+
+/* the owe is only ever told to the daemon while nobody is using the line: a bring-up takes the line down for a few
+ * seconds, so an owed one waits for the call to end rather than cutting it */
+static void test_hd_layout_waits_for_a_quiet_line(void)
+{
+	struct rig r;
+	struct phone_cfg next;
+	int want = -1;
+
+	qdai_reply = "+QDAI: x,1,0,4,0,1,1,1\r\n\r\nOK\r\n";			/* the modem keeps 16 kHz */
+	rig_init(&r);
+	with_questions(&r);
+	rig_open(&r);
+	next = r.cfg;
+	next.hd = 1;
+	assert(phone_set_cfg(r.p, &next) == 0);
+	run_ms(&r, 4000);
+	assert(phone_layout_due(r.p, &want) == 1 && want == 1);			/* quiet line: the bring-up is owed */
+	handset(&r, 1);							/* the handset goes up on it */
+	run_ms(&r, 600);
+	assert(status_of(&r).line == PHONE_LINE_DIAL_TONE);
+	assert(phone_layout_due(r.p, &want) == 0);					/* the line is in use: nothing is owed against it */
+	handset(&r, 0);							/* and back down: the owe is there again */
+	run_ms(&r, 600);
+	assert(status_of(&r).line == PHONE_LINE_IDLE || status_of(&r).line == PHONE_LINE_DIAL_TONE);
+	assert(phone_layout_due(r.p, &want) == 1 && want == 1);
+	rig_close(&r);
+	qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";
+}
+
+/* a modem that answers the other rate is asked a bounded number of times and then left alone: the line keeps working
+ * narrowband, the setting is not forgotten, and the reason is said once rather than every round */
+static void test_hd_layout_modem_refuses(void)
+{
+	struct rig r;
+	struct phone_cfg next;
+	int want = -1;
+	unsigned int writes;
+
+	rig_init(&r);
+	with_questions(&r);
+	rig_open(&r);
+	qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";			/* it stays at 8 kHz however often it is asked */
+	next = r.cfg;
+	next.hd = 1;
+	assert(phone_set_cfg(r.p, &next) == 0);
+	run_ms(&r, 120000);
+	writes = acts_starting(&r, "AT+QDAI=");
+	assert(writes >= 1 && writes <= 3);						/* asked, not asked again every idle round */
+	assert(phone_layout_due(r.p, &want) == 0);					/* the layout is never owed against the modem's own word */
+	assert(count_in(log_text(&r), "the modem is left at") == 1);			/* said once */
+	assert(status_of(&r).line == PHONE_LINE_DIAL_TONE || status_of(&r).line == PHONE_LINE_IDLE);	/* the line was never taken down */
+	rig_close(&r);
+}
+
+/* 5. the call list is asked for every 250 ms while a call is being set up, while a hang-up sent from here is pending and for 2 s after an answer; every second otherwise */
 static void test_fast_call_list(void)
 {
 	struct rig r;
@@ -2593,6 +3192,7 @@ static void test_modem_setup(void)
 	run_ms(&r, 3000);
 	assert(r.act_count >= 4);
 	assert(!strcmp(r.acts[0], "ATE0") && !strcmp(r.acts[1], "AT+CMEE=1") && !strcmp(r.acts[2], "AT+CLIP=1") && !strcmp(r.acts[3], "AT+CRC=1"));
+	assert(!strcmp(r.acts[4], "AT+COPS=3,0"));			/* the operator is read as digits, so its country can be read out of it */
 	for (k = 0; k < r.act_count && k < ACTS_MAX; k++)			/* unset = left as the modem has it */
 		assert(strncmp(r.acts[k], "AT+CLVL=", 8) && strncmp(r.acts[k], "AT+QRXGAIN=", 11));
 	rig_close(&r);
@@ -2829,6 +3429,472 @@ static void test_dead_chip_fails_loud(void)
 	free(r.lbuf);				/* the close moves the buffer: free the one it leaves */
 }
 
+/* a held front-end call is not taken over by a lift: the lift gets the recall dial tone, and the held record keeps
+ * the page's door */
+static void test_held_front_end_not_taken(void)
+{
+	struct rig r;
+
+	rig_init(&r);
+	r.ops.legs = fm_legs;
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	r.fm.legs[0] = (struct call_leg){ .idx = 1, .dir = 1, .stat = LEG_INCOMING, .number = "5551" };
+	r.fm.nlegs = 1;
+	run_ms(&r, 2500);
+	assert(phone_answer(r.p, PHONE_ANSWERED_WEB) == 0);
+	r.listed = CALL_ACTIVE;
+	r.fm.legs[0].stat = LEG_ACTIVE;
+	run_ms(&r, 2500);
+	assert(status_of(&r).answered_by == PHONE_ANSWERED_WEB);
+
+	/* the page holds it */
+	assert(phone_flash(r.p) == 0);
+	run_ms(&r, 3500);
+	assert(acts_of(&r, "AT+CHLD=2") == 1);
+	legs_are(&r, CALL_HELD, 1, LEG_HELD, 0);
+	run_ms(&r, 2500);
+	assert(status_of(&r).line == PHONE_LINE_DIAL_TONE);
+	assert(count_in(log_text(&r), "the handset is down: recall dial tone") >= 1);
+	assert(count_in(log_text(&r), "the caller is off-hook") == 0);
+
+	/* a lift is not a take-over of a held call */
+	handset(&r, 1);
+	run_ms(&r, 800);
+	assert(count_in(log_text(&r), "the handset takes the front end's call") == 0);
+
+	/* the held record closes with the page's door */
+	legs_are(&r, CALL_NONE, 0, 0, 0);
+	run_ms(&r, 2500);
+	assert(r.rec_count == 1 && r.rec[0].id == 1 && r.rec[0].answered_by == PHONE_ANSWERED_WEB);
+	rig_close(&r);
+}
+
+/*
+ * The front end takes the caller the answering machine holds: the same door a lift at the handset opens, asked from
+ * the page or from the installed service's leg. The line is already in the call, so nothing goes to the modem.
+ */
+static void test_machine_takeover(void)
+{
+	struct rig r;
+	struct phone_status st;
+	unsigned int before;
+
+	/* the machine has the caller, and the page asks for it */
+	machine_rig(&r, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1200);
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 1500);
+	assert(status_of(&r).machine == PHONE_MACHINE_ANSWERED && status_of(&r).line == PHONE_LINE_CALL);
+	before = call_events(&r);
+	assert(phone_takeover(r.p, PHONE_ANSWERED_WEB) == 0);
+	assert(call_events(&r) == before + 1);		/* the new listener is published, not only stored */
+	run_ms(&r, 600);
+	st = status_of(&r);
+	assert(st.line == PHONE_LINE_CALL && st.machine == PHONE_MACHINE_NONE && st.answered_by == PHONE_ANSWERED_WEB);
+	assert(count_in(log_text(&r), "the front end takes the answering machine's call") == 1);
+	assert(machine_events(&r, PHONE_MACHINE_TAKEN) == 1);
+	assert(acts_of(&r, "ATA") == 1 && acts_of(&r, "AT+CHUP") == 0);	/* no second answer, no release: the call is on the line */
+	/* the caller ends it: the record carries who was listening, and the line hears no release tone at an empty phone */
+	r.listed = CALL_GONE;
+	run_ms(&r, 1500);
+	st = status_of(&r);
+	assert(st.line == PHONE_LINE_IDLE && st.machine == PHONE_MACHINE_NONE);
+	assert(count_in(log_text(&r), "the front end's call ended") == 1);
+	r.listed = CALL_NONE;
+	run_ms(&r, 1200);
+	assert(r.rec_count == 1 && r.rec[0].dir == PHONE_DIR_IN && r.rec[0].answered_by == PHONE_ANSWERED_WEB);
+	assert(!strstr(log_text(&r), "the busy tone") && !strstr(log_text(&r), "the congestion tone"));
+	rig_close(&r);
+
+	/* the installed service's leg asks the same way, and is the one that ends up listening */
+	machine_rig(&r, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1200);
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 1500);
+	assert(phone_takeover(r.p, PHONE_ANSWERED_SIP) == 0);
+	run_ms(&r, 600);
+	st = status_of(&r);
+	assert(st.answered_by == PHONE_ANSWERED_SIP && st.machine == PHONE_MACHINE_NONE && st.line == PHONE_LINE_CALL);
+	rig_close(&r);
+
+	/* the machine's answer is still on its way: the line is not in the call yet, so there is nothing to hand over */
+	machine_rig(&r, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1200);
+	assert(status_of(&r).machine == PHONE_MACHINE_ANSWERING);
+	assert(phone_takeover(r.p, PHONE_ANSWERED_WEB) == -ENOENT);
+	rig_close(&r);
+
+	/* a plain ringing call is answered, not taken over: the machine holds nothing */
+	rig_init(&r);
+	rig_open(&r);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1200);
+	assert(phone_takeover(r.p, PHONE_ANSWERED_WEB) == -ENOENT);
+	assert(acts_of(&r, "ATA") == 0);
+	r.listed = CALL_NONE;
+	run_ms(&r, 1200);
+	rig_close(&r);
+
+	/* two doors ask at once: the first front end has the call, so the second is turned away by the line itself */
+	machine_rig(&r, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1200);
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 1500);
+	assert(phone_takeover(r.p, PHONE_ANSWERED_WEB) == 0);
+	assert(phone_takeover(r.p, PHONE_ANSWERED_SIP) == -EBUSY);
+	run_ms(&r, 600);
+	st = status_of(&r);
+	assert(st.answered_by == PHONE_ANSWERED_WEB && st.line == PHONE_LINE_CALL && st.machine == PHONE_MACHINE_NONE);
+	assert(count_in(log_text(&r), "the front end takes the answering machine's call") == 1);
+	assert(acts_of(&r, "AT+CHUP") == 0);		/* the refused hand-over sends nothing to the modem */
+	rig_close(&r);
+
+	/* the handset got there first: the person at the phone keeps the caller */
+	machine_rig(&r, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1200);
+	r.listed = CALL_ACTIVE;
+	run_ms(&r, 1500);
+	handset(&r, 1);				/* lifted beside the machine's call */
+	run_ms(&r, 600);
+	st = status_of(&r);
+	assert(st.machine == PHONE_MACHINE_NONE && st.off_hook && st.line == PHONE_LINE_CALL);
+	assert(count_in(log_text(&r), "the handset takes the answering machine's call") == 1);
+	assert(phone_takeover(r.p, PHONE_ANSWERED_WEB) == -EBUSY);
+	assert(acts_of(&r, "AT+CHUP") == 0);
+	rig_close(&r);
+}
+
+/*
+ * Quiet hours on the line: the same incoming call the other tests ring for. The handset is not driven, the page
+ * still sees the call and can answer it, and the window's own mode decides what else happens.
+ */
+static void quiet_rig_at(struct rig *r, int mode, int repeat_min, int machine, unsigned int delay_ms)
+{
+	rig_init(r);
+	dnd_clear(&r->dnd, NULL);
+	r->dnd.now.clock_known = 1;
+	r->dnd.now.weekday = 3;
+	r->dnd.now.minute = 1400;			/* inside tonight's window */
+	r->dnd.now.epoch_s = 1700000000ull;
+	assert(dnd_window_add(&r->dnd, 1, "22:00", "07:00", DND_DAYS_EVERY, 0, mode, repeat_min, NULL) == 0);
+	r->cfg.dnd = &r->dnd;
+	r->cfg.machine = machine;
+	r->cfg.machine_delay_ms = delay_ms;
+	rig_open(r);
+}
+
+static void quiet_rig(struct rig *r, int mode, int repeat_min)
+{
+	quiet_rig_at(r, mode, repeat_min, 0, 0);
+}
+
+static void test_quiet(void)
+{
+	struct rig r;
+	struct phone_status st;
+
+	/* silent: no ring voltage, the line is not idle, and the status says this caller is quieted */
+	quiet_rig(&r, DND_MODE_SILENT, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") == 0);
+	assert(count_in(log_text(&r), "the phone rings for the incoming call") == 0);
+	st = status_of(&r);
+	assert(st.quiet && st.line == PHONE_LINE_RINGING);
+	/* the event that says the line is ringing carries the verdict beside it: the front end invites its own phones on
+	 * that event, so a verdict arriving only in the next tick lets a network phone ring for a quieted call */
+	assert(ring_event_quiet(&r) == 1);
+	assert(acts_of(&r, "AT+CHUP") == 0 && acts_of(&r, "ATA") == 0);	/* nobody answered and nobody refused */
+	assert(count_in(log_text(&r), "the answering machine") == 0);
+	/* the silence is said, and said once: the verdict is worked out again at every step of the 3 s this call was
+	 * listed, so a line written each time would fill the log with the same sentence */
+	assert(count_in(log_text(&r), "quiet hours hold the phone off the incoming call") == 1);
+	/* a second caller is a second call to speak about: the line is said again, not held back by the first one */
+	r.listed = CALL_GONE;
+	run_ms(&r, 1200);
+	r.listed = CALL_NONE;
+	run_ms(&r, 1200);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1500);
+	assert(count_in(log_text(&r), "quiet hours hold the phone off the incoming call") == 2);
+	assert(status_of(&r).quiet);
+	rig_close(&r);
+
+	/* the same call with the machine armed: a silent window leaves it alone, it does not answer in the caller's ear */
+	quiet_rig_at(&r, DND_MODE_SILENT, 0, 1, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(acts_of(&r, "ATA") == 0 && count_in(log_text(&r), "the answering machine answers") == 0);
+	rig_close(&r);
+
+	/* machine: the call is handed to the answering machine without ever ringing the handset */
+	quiet_rig_at(&r, DND_MODE_MACHINE, 0, 1, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1200);
+	assert(count_in(log_text(&r), "ring started") == 0);
+	assert(acts_of(&r, "ATA") == 1 && count_in(log_text(&r), "the answering machine answers (") == 1);
+	rig_close(&r);
+
+	/* reject: the caller is released, and the log says quiet hours are why */
+	quiet_rig(&r, DND_MODE_REJECT, 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 1500);
+	assert(count_in(log_text(&r), "the line is quiet") == 1 && acts_of(&r, "AT+CHUP") >= 1);
+	assert(count_in(log_text(&r), "ring started") == 0);
+	rig_close(&r);
+
+	/* an always-ring number rings through the window */
+	quiet_rig(&r, DND_MODE_SILENT, 0);
+	assert(dnd_allow_add(&r.dnd, "0771234567", NULL) == 0);
+	the_caller = "0771234567";
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") >= 1 && !status_of(&r).quiet);
+	the_caller = "5551";
+	rig_close(&r);
+
+	/* an emergency number rings through it whatever the list says */
+	quiet_rig(&r, DND_MODE_SILENT, 0);
+	the_caller = "119";
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") >= 1 && !status_of(&r).quiet);
+	the_caller = "5551";
+	rig_close(&r);
+
+	/* the escape: the same caller again inside the window rings, on the daemon's clock */
+	quiet_rig(&r, DND_MODE_SILENT, 15);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") == 0);
+	r.listed = CALL_NONE;			/* the caller gave up */
+	run_ms(&r, 2000);
+	r.dnd.now.epoch_s += 60;			/* a minute later, the same number */
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") >= 1 && !status_of(&r).quiet);
+	rig_close(&r);
+
+	/* a different caller does not inherit the escape */
+	quiet_rig(&r, DND_MODE_SILENT, 15);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	r.listed = CALL_NONE;
+	run_ms(&r, 1500);
+	the_caller = "0779999999";
+	r.dnd.now.epoch_s += 60;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") == 0 && status_of(&r).quiet);
+	the_caller = "5551";
+	rig_close(&r);
+
+	/* a call that was let through while it was listed is not a silenced one: it is not remembered, so the
+	 * number's next call is judged by the windows again */
+	quiet_rig(&r, DND_MODE_SILENT, 15);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") == 0 && status_of(&r).quiet);
+	r.dnd.manual = DND_MANUAL_OFF;			/* *79 while the caller waits: the line rings for it */
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") >= 1 && !status_of(&r).quiet);
+	r.listed = CALL_NONE;
+	run_ms(&r, 2000);
+	r.dnd.now.epoch_s += 60;
+	r.dnd.manual = DND_MANUAL_AUTO;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") == 1 && status_of(&r).quiet);	/* the caller gave up before anyone answered it */
+	rig_close(&r);
+
+	/* a caller whose number the network withholds is never the caller of a repeat: the escape cannot be
+	 * granted to a caller nobody can name, and the withheld one leaves no memory a later call answers */
+	quiet_rig(&r, DND_MODE_SILENT, 15);
+	the_caller = "";
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") == 0 && status_of(&r).quiet);
+	r.listed = CALL_NONE;
+	run_ms(&r, 2000);
+	r.dnd.now.epoch_s += 60;			/* the same withheld caller tries again */
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") == 0 && status_of(&r).quiet);
+	the_caller = "5551";
+	rig_close(&r);
+
+	/* outside every window the line rings as it always did, and an unknown clock cannot quiet anything */
+	quiet_rig(&r, DND_MODE_SILENT, 0);
+	r.dnd.now.minute = 900;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") >= 1 && !status_of(&r).quiet);
+	rig_close(&r);
+
+	quiet_rig(&r, DND_MODE_SILENT, 0);
+	r.dnd.now.clock_known = 0;
+	r.dnd.now.epoch_s = 100;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") >= 1 && !status_of(&r).quiet);
+	rig_close(&r);
+
+	/* a quiet asked for by hand holds even before the clock is known */
+	quiet_rig(&r, DND_MODE_SILENT, 0);
+	r.dnd.now.clock_known = 0;
+	r.dnd.now.epoch_s = 100;
+	r.dnd.manual = DND_MANUAL_ON;
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 3000);
+	assert(count_in(log_text(&r), "ring started") == 0 && status_of(&r).quiet);
+	rig_close(&r);
+}
+
+/*
+ * The code the handset dials for quiet hours: the line answers it, gives its tone back, and tells the daemon what
+ * was asked. Keeping the ask, and saying so on the page, is the daemon's work, not the line's.
+ */
+static void test_quiet_codes(void)
+{
+	struct rig r;
+
+	rig_init(&r);
+	rig_open(&r);
+	press(&r, "*78");
+	handset(&r, 1);
+	run_ms(&r, 9000);
+	assert(dnd_event_of(&r) == DND_MANUAL_ON);
+	assert(count_in(log_text(&r), "the phone's code asks for quiet hours on") == 1);
+	assert(acts_starting(&r, "ATD") == 0);			/* nothing went to the network */
+	assert(status_of(&r).line == PHONE_LINE_DIAL_TONE);		/* the keys are used up: the handset is offered a dial again */
+	rig_close(&r);
+
+	/* the same door the other way, with the send key on the end of it */
+	rig_init(&r);
+	rig_open(&r);
+	press(&r, "*79#");
+	handset(&r, 1);
+	run_ms(&r, 9000);
+	assert(dnd_event_of(&r) == DND_MANUAL_OFF);
+	assert(count_in(log_text(&r), "the phone's code asks for quiet hours off") == 1);
+	assert(acts_starting(&r, "ATD") == 0);
+	rig_close(&r);
+
+	/* the ask happens once, not on every step: a code is a key press, not a state the line keeps reporting */
+	rig_init(&r);
+	rig_open(&r);
+	press(&r, "*78");
+	handset(&r, 1);
+	run_ms(&r, 9000);
+	assert(count_in(log_text(&r), "the phone's code asks") == 1);
+	rig_close(&r);
+
+	/* off network the ask still works: a wish about the phone's own bell needs no call control, and the line is
+	 * handed back what it had (there is no service to dial into, so no dial tone to offer) */
+	rig_init(&r);
+	r.fm.lost = 1;
+	rig_open(&r);
+	press(&r, "*78");
+	handset(&r, 1);
+	run_ms(&r, 9000);
+	assert(dnd_event_of(&r) == DND_MANUAL_ON);
+	assert(status_of(&r).line == PHONE_LINE_NO_SERVICE && status_of(&r).off_hook);
+	assert(count_in(log_text(&r), "the phone's code asks for quiet hours on") == 1);
+	rig_close(&r);
+
+	/* the string the code used up is gone: keys dialled from the fresh tone are a new dial, not the code joined to it
+	 * (the dial goes out six seconds after the last key, which is DIAL_IDLE_MS) */
+	rig_init(&r);
+	rig_open(&r);
+	press(&r, "*78");
+	handset(&r, 1);
+	run_ms(&r, 8000);
+	assert(dnd_event_of(&r) == DND_MANUAL_ON);
+	press_after(&r, 9000, "45#");
+	run_ms(&r, 9000);
+	assert(acts_of(&r, "ATD45;") == 1 && acts_of(&r, "ATD*7845;") == 0);
+	assert(count_in(log_text(&r), "the phone's code asks") == 1);
+	rig_close(&r);
+
+	/* the page's own door asks the same way: a typed code is answered here too, not dialled */
+	rig_init(&r);
+	rig_open(&r);
+	assert(phone_dial(r.p, "*78", PHONE_ANSWERED_WEB) == 0);
+	run_ms(&r, 2000);
+	assert(dnd_event_of(&r) == DND_MANUAL_ON && acts_starting(&r, "ATD") == 0);
+	rig_close(&r);
+
+	/* off network the typed ask still reaches the line, as the handset's does: the wish is about this line's own
+	 * bell and needs no call control. The line has lost the port here, not merely the registration. */
+	rig_init(&r);
+	r.fm.lost = 1;
+	rig_open(&r);
+	run_ms(&r, 3000);
+	assert(!status_of(&r).modem_up);			/* the port is gone: a dial would be refused here */
+	assert(phone_dial(r.p, "*78", PHONE_ANSWERED_WEB) == 0);
+	assert(dnd_event_of(&r) == DND_MANUAL_ON);
+	assert(phone_dial(r.p, "*79", PHONE_ANSWERED_WEB) == 0);
+	assert(dnd_event_of(&r) == DND_MANUAL_OFF);
+	assert(acts_starting(&r, "ATD") == 0);
+	rig_close(&r);
+
+	/* a line the handset is holding is not asked: the ask is refused, and the digits the handset collected are left
+	 * alone to dial on their own */
+	rig_init(&r);
+	rig_open(&r);
+	handset(&r, 1);
+	press_after(&r, 600, "45");
+	run_ms(&r, 1000);
+	assert(phone_dial(r.p, "*78", PHONE_ANSWERED_WEB) == -EBUSY);
+	assert(dnd_event_of(&r) == -1);			/* nothing was asked of the daemon */
+	run_ms(&r, 8000);
+	assert(acts_of(&r, "ATD45;") == 1);
+	rig_close(&r);
+
+	/* the ask leaves no dialling in the line's hand: a code is not a call, so the next thing the line does is the
+	 * handset's own work. Here it is a blocked number, which takes the handset's tone and the handset's log line -
+	 * a flag left over from the typed code would hand both to the page and leave the handset silent. */
+	{
+		struct blocking *b = rules(NULL, "45", 0);
+
+		rig_init(&r);
+		r.cfg.block = b;
+		rig_open(&r);
+		assert(phone_dial(r.p, "*78", PHONE_ANSWERED_WEB) == 0);
+		run_ms(&r, 1000);
+		handset(&r, 1);
+		press_after(&r, 2000, "45#");
+		run_ms(&r, 9000);
+		assert(acts_starting(&r, "ATD") == 0 && status_of(&r).line == PHONE_LINE_RELEASE);
+		assert(count_in(log_text(&r), "a blocked number was dialled") == 1);
+		assert(count_in(log_text(&r), "the front end asked for a blocked number") == 0);
+		handset(&r, 0);
+		run_ms(&r, 1500);
+		assert(status_of(&r).line == PHONE_LINE_IDLE);
+		rig_close(&r);
+		free(b);
+	}
+
+	/* the same line, the other way round: a caller that gives up is the line's call ending, not a front end's -
+	 * the typed code made no front end of it */
+	rig_init(&r);
+	rig_open(&r);
+	assert(phone_dial(r.p, "*79", PHONE_ANSWERED_WEB) == 0);
+	r.listed = CALL_INCOMING;
+	run_ms(&r, 2500);
+	assert(count_in(log_text(&r), "ring started") == 1);
+	r.listed = CALL_GONE;
+	run_ms(&r, 2000);
+	assert(count_in(log_text(&r), "the front end's call ended") == 0);
+	rig_close(&r);
+}
+
 int main(void)
 {
 	test_open_close();
@@ -2840,19 +3906,35 @@ int main(void)
 	test_ring_test();
 	test_hangup();
 	test_events();
+	test_answer_flicker();
+	test_release_tone_fallback();
+	test_release_tone_none();
+	test_release_tone_none_outgoing();
+
 	test_no_number_in_log();
 	test_late_step();
 	test_busy_line_refuses();
 	test_ring_trip_answers_at_once();
+	test_ring_trip_without_lift();
 	test_cid_holds_the_pause();
+	test_cid_prering_keeps_its_gap();
+	test_cid_prering_gap_answers();
+	test_cid_prering_gap_serves_the_machine();
+	test_cid_prering_a_failed_send_still_rings();
 	test_cid_display_number();
+	test_cid_foreign_number_forms();
 	test_machine_answer();
 	test_machine_waiting();
 	test_modem_timeouts();
 	test_idle_questions();
+	test_network_identity_reads();
 	test_dtmf_in_call();
 	test_no_service();
 	test_audio_check();
+	test_hd_layout_waits_for_the_modem();
+	test_hd_layout_already_confirmed();
+	test_hd_layout_waits_for_a_quiet_line();
+	test_hd_layout_modem_refuses();
 	test_fast_call_list();
 	test_modem_setup();
 	test_ringback_option();
@@ -2872,9 +3954,13 @@ int main(void)
 	test_call_waiting();
 	test_call_waiting_setup();
 	test_hold_and_second_call();
+	test_held_front_end_not_taken();
 	test_three_way();
 	test_abandoned_second_call();
 	test_third_call();
+	test_machine_takeover();
+	test_quiet();
+	test_quiet_codes();
 	printf("daemon: all tests passed\n");
 	return 0;
 }

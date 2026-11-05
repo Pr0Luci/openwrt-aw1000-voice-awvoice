@@ -26,9 +26,9 @@ static void test_add_and_lookup(void)
 	const char *plain[] = { "0999" };
 	char name[40];
 
-	assert(phonebook_add(pb, "Ann", one, 1, "", NULL) == 0);
-	assert(phonebook_add(pb, "Bob", two, 2, "07", NULL) == 0);
-	assert(phonebook_add(pb, "Cy", plain, 1, NULL, NULL) == 0);	/* a number without a type is taken */
+	assert(phonebook_add(pb, "Ann", one, 1, "", 0, NULL) == 0);
+	assert(phonebook_add(pb, "Bob", two, 2, "07", 0, NULL) == 0);
+	assert(phonebook_add(pb, "Cy", plain, 1, NULL, 0, NULL) == 0);	/* a number without a type is taken */
 	assert(pb->n == 3 && pb->c[0].count == 1 && !strcmp(pb->c[0].number[0], "012345") && !strcmp(pb->c[1].quick, "07"));
 	/* the same number in any written form finds the contact */
 	assert(phonebook_name(pb, "012345", name, sizeof(name)) == 0 && !strcmp(name, "Ann"));
@@ -53,8 +53,8 @@ static void test_speed(void)
 	const char *b[] = { "0888" };
 	char out[40];
 
-	assert(phonebook_add(pb, "Ann", a, 2, "05", NULL) == 0);
-	assert(phonebook_add(pb, "Bob", b, 1, "12", NULL) == 0);
+	assert(phonebook_add(pb, "Ann", a, 2, "05", 0, NULL) == 0);
+	assert(phonebook_add(pb, "Bob", b, 1, "12", 0, NULL) == 0);
 	assert(phonebook_speed(pb, "05", out, sizeof(out)) == 0 && !strcmp(out, "012345"));	/* the first number */
 	assert(phonebook_speed(pb, "12", out, sizeof(out)) == 0 && !strcmp(out, "0888"));
 	assert(phonebook_speed(pb, "06", out, sizeof(out)) == -ENOENT);
@@ -62,7 +62,7 @@ static void test_speed(void)
 	assert(phonebook_speed(pb, "051", out, sizeof(out)) == -ENOENT);
 	assert(phonebook_speed(pb, "", out, sizeof(out)) == -ENOENT && phonebook_speed(pb, NULL, out, sizeof(out)) == -ENOENT);
 	/* codes are unique: the second contact with a taken code is refused and not added */
-	assert(phonebook_add(pb, "Cy", b, 1, "05", NULL) == -EEXIST && pb->n == 2);
+	assert(phonebook_add(pb, "Cy", b, 1, "05", 0, NULL) == -EEXIST && pb->n == 2);
 	assert(phonebook_speed(pb, "05", out, sizeof(out)) == 0 && !strcmp(out, "012345"));
 	free(pb);
 }
@@ -83,22 +83,22 @@ static void test_refusals(void)
 	char longname[64];
 	unsigned int k;
 
-	assert(phonebook_add(pb, "", ok, 1, "", log) == -EINVAL);
-	assert(phonebook_add(pb, NULL, ok, 1, "", log) == -EINVAL);
-	assert(phonebook_add(pb, "Ann", ok, 0, "", log) == -EINVAL);
-	assert(phonebook_add(pb, "Ann", four, 4, "", log) == -EINVAL);
-	assert(phonebook_add(pb, "Ann", bad_num, 1, "", log) == -EINVAL);
-	assert(phonebook_add(pb, "Ann", bad_type, 1, "", log) == -EINVAL);
-	assert(phonebook_add(pb, "Ann", plus_late, 1, "", log) == -EINVAL);
-	assert(phonebook_add(pb, "Ann", toolong, 1, "", log) == -EINVAL);
-	assert(phonebook_add(pb, "Ann", ok, 1, "1", log) == -EINVAL);		/* a code is two digits */
-	assert(phonebook_add(pb, "Ann", ok, 1, "123", log) == -EINVAL);
-	assert(phonebook_add(pb, "Ann", ok, 1, "ab", log) == -EINVAL);
+	assert(phonebook_add(pb, "", ok, 1, "", 0, log) == -EINVAL);
+	assert(phonebook_add(pb, NULL, ok, 1, "", 0, log) == -EINVAL);
+	assert(phonebook_add(pb, "Ann", ok, 0, "", 0, log) == -EINVAL);
+	assert(phonebook_add(pb, "Ann", four, 4, "", 0, log) == -EINVAL);
+	assert(phonebook_add(pb, "Ann", bad_num, 1, "", 0, log) == -EINVAL);
+	assert(phonebook_add(pb, "Ann", bad_type, 1, "", 0, log) == -EINVAL);
+	assert(phonebook_add(pb, "Ann", plus_late, 1, "", 0, log) == -EINVAL);
+	assert(phonebook_add(pb, "Ann", toolong, 1, "", 0, log) == -EINVAL);
+	assert(phonebook_add(pb, "Ann", ok, 1, "1", 0, log) == -EINVAL);		/* a code is two digits */
+	assert(phonebook_add(pb, "Ann", ok, 1, "123", 0, log) == -EINVAL);
+	assert(phonebook_add(pb, "Ann", ok, 1, "ab", 0, log) == -EINVAL);
 	memset(longname, 'n', 33);
 	longname[33] = 0;
-	assert(phonebook_add(pb, longname, ok, 1, "", log) == -EINVAL);
+	assert(phonebook_add(pb, longname, ok, 1, "", 0, log) == -EINVAL);
 	assert(pb->n == 0);
-	assert(phonebook_add(pb, "Ann", edge, 1, "", log) == 0 && pb->n == 1);
+	assert(phonebook_add(pb, "Ann", edge, 1, "", 0, log) == 0 && pb->n == 1);
 	/* the log names the reason and holds no name and no number */
 	fflush(log);
 	assert(log_buf && strstr(log_buf, "was not taken") && !strstr(log_buf, "Ann") && !strstr(log_buf, "01a3") && !strstr(log_buf, "fax"));
@@ -106,8 +106,30 @@ static void test_refusals(void)
 	free(log_buf);
 	/* the book holds PB_CONTACTS_MAX contacts, then refuses */
 	for (k = 1; k < PB_CONTACTS_MAX; k++)
-		assert(phonebook_add(pb, "x", ok, 1, "", NULL) == 0);
-	assert(pb->n == PB_CONTACTS_MAX && phonebook_add(pb, "y", ok, 1, "", NULL) == -ENOSPC);
+		assert(phonebook_add(pb, "x", ok, 1, "", 0, NULL) == 0);
+	assert(pb->n == PB_CONTACTS_MAX && phonebook_add(pb, "y", ok, 1, "", 0, NULL) == -ENOSPC);
+	free(pb);
+}
+
+/* who rings through quiet hours: the contact's own answer, read the same way a name is read */
+static void test_ring_through(void)
+{
+	struct phonebook *pb = new_book();
+	const char *a[] = { "0771234567:mobile", "0779999999:home" };
+	const char *b[] = { "0770000000" };
+
+	assert(phonebook_add(pb, "Ann", a, 2, "", 1, NULL) == 0);
+	assert(phonebook_add(pb, "Bob", b, 1, "", 0, NULL) == 0);
+	/* either number of a marked contact, in any written form the plan reads as the same caller */
+	assert(phonebook_ring_through(pb, "0771234567"));
+	assert(phonebook_ring_through(pb, "+94771234567"));
+	assert(phonebook_ring_through(pb, "0779999999"));
+	/* an unmarked contact is an ordinary caller, and so is anyone the book does not hold */
+	assert(!phonebook_ring_through(pb, "0770000000"));
+	assert(!phonebook_ring_through(pb, "0771111111"));
+	/* a withheld caller is nobody's contact */
+	assert(!phonebook_ring_through(pb, ""));
+	assert(!phonebook_ring_through(pb, NULL));
 	free(pb);
 }
 
@@ -116,6 +138,7 @@ int main(void)
 	test_add_and_lookup();
 	test_speed();
 	test_refusals();
+	test_ring_through();
 	puts("phonebook: all tests passed");
 	return 0;
 }

@@ -53,7 +53,7 @@ static void test_one_match(void)
 	make_dir("1-1.2:1.0/ttyUSB0");
 	make_dir("1-1.2:1.2");
 	make_dir("1-1.2:1.2/ttyUSB2");
-	make_dir("1-1.2:1.20");					/* a different interface whose number starts with ours */
+	make_dir("1-1.2:1.20");					/* a different interface whose number starts with the one asked for */
 	make_dir("1-1.2:1.20/ttyUSB9");
 	make_dir("1-1.2:1.3");
 	make_dir("1-1.2:1.3/ttyUSB3");

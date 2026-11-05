@@ -7,7 +7,7 @@
 'require fs';
 
 /*
- * live.js - the provider of the phone page: the data contract v2 (DESIGN.md section 2) served from the phone daemon.
+ * live.js - the provider of the phone page: the reply shapes api.h states, served from the phone daemon.
  *
  *   status, health, hangup, ring_test, reload   ubus object awvoice (the daemon's own typed replies)
  *   calls, calls_delete                          ubus object awvoice (the call log)
@@ -43,7 +43,7 @@ var bus = {
 var CONF = 'awvoice', SECT = 'main';
 var LOG_LINES = 40;
 var RING_TEST_SEC = 5;
-var MACHINE_GREETING_DEF = '/etc/awvoice/greeting.wav', MACHINE_PATH_DEF = '/etc/awvoice/messages';
+var MACHINE_PATH_DEF = '/etc/awvoice/messages';	/* the greeting has no default here: it is one constant file (greeting.js) */
 
 var STATES = { idle: 1, offhook: 1, ring: 1, call: 1, noservice: 1, down: 1 };
 var PHASES = { ringing: 1, dialing: 1, alerting: 1, active: 1 };
@@ -58,10 +58,11 @@ var AVAILABLE = {
 	listContacts: true, saveContact: true, removeContact: true,
 	getBlocking: true, saveBlocking: true,
 	getForwarding: true, saveForwarding: true,
-	listAlarms: true, saveAlarm: true, removeAlarm: true
+	listAlarms: true, saveAlarm: true, removeAlarm: true,
+	listQuiet: true, saveQuiet: true, removeQuiet: true, saveQuietAllow: true
 };
 
-/* the settings fields whose daemon support exists (M4); the rest are shown but cannot be saved yet */
+/* the settings fields the daemon serves today; the rest are shown but cannot be saved yet */
 var SETTINGS_LIVE = {
 	cid: true, cidWhen: true, myNumber: true, dialPauseSec: true, hookFlash: true, ringback: true,
 	earpieceVolume: true, modemRxGain: true, usbInterface: true,
@@ -88,7 +89,7 @@ function str(v) { return typeof v === 'string' ? v : ''; }
 
 function downStatus() {
 	return {
-		state: 'down', line: 'down', hook: null, machine: null, call: null,
+		state: 'down', line: 'down', hook: null, machine: null, quiet: null, call: null,
 		voiceNetwork: { registered: null, ims: null },
 		signal: { rsrpDbm: null, network: null },
 		service: { running: false }, myNumber: ''
@@ -105,6 +106,8 @@ function normStatus(r) {
 		hook: r.hook === 'on' || r.hook === 'off' ? r.hook : null,
 		/* the answering machine's part in the call; null when the daemon did not say (an old one, or no line) */
 		machine: MACHINES[r.machine] ? r.machine : null,
+		/* quiet hours cover this caller: the call is offered, this side makes no sound; null when the daemon did not say */
+		quiet: tri(r.quiet),
 		call: c ? {
 			id: num(c.id), direction: c.direction === 'OUT' ? 'OUT' : 'IN', number: str(c.number),
 			phase: PHASES[c.phase] ? c.phase : 'dialing', elapsedSec: Math.max(0, num(c.elapsedSec) || 0)
@@ -118,14 +121,17 @@ function normStatus(r) {
 
 function normHealth(r) {
 	r = r || {};
-	var a = r.atPort || {}, l = r.line || {}, m = r.modem || {}, s = r.system || {}, b = s.bridge || {}, k = r.counters || {}, i = r.indicator || {}, mc = r.machine || {};
-	var st = r.storage || {}, sr = st.recordings || {}, sm = st.messages || {};
+	var a = r.atPort || {}, l = r.line || {}, m = r.modem || {}, s = r.system || {}, b = s.bridge || {}, k = r.counters || {}, i = r.indicator || {}, mc = r.machine || {}, sp = r.sip || {};
+	var st = r.storage || {}, sr = st.recordings || {}, sm = st.messages || {}, q = r.quiet || {};
 	return {
-		atPort: { port: str(a.port), usbInterface: num(a.usbInterface), responding: tri(a.responding), lastReplyAgoSec: num(a.lastReplyAgoSec) },
+		atPort: { port: str(a.port), usbInterface: num(a.usbInterface), responding: tri(a.responding), lastReplyAgoSec: num(a.lastReplyAgoSec), portOwner: str(a.portOwner) || null },
 		line: { channel: num(l.channel), hook: l.hook === 'on' || l.hook === 'off' ? l.hook : null, state: str(l.state),
+			numbering: str(l.numbering) || null,
 			calibrated: tri(l.calibrated), batteryMv: num(l.batteryMv), loopUa: num(l.loopUa) },
 		modem: { simReady: tri(m.simReady), registered: tri(m.registered), imsRegistered: tri(m.imsRegistered),
-			rsrpDbm: num(m.rsrpDbm), network: str(m.network) || null, audioSlave: tri(m.audioSlave), clir: m.clir === 'network' || m.clir === 'hide' || m.clir === 'show' ? m.clir : null, clirStatus: str(m.clirStatus) || null },
+			rsrpDbm: num(m.rsrpDbm), network: str(m.network) || null,
+			operator: str(m.operator) || null, operatorName: str(m.operatorName) || null,
+			audioSlave: tri(m.audioSlave), hdVoice: str(m.hdVoice) || null, clir: m.clir === 'network' || m.clir === 'hide' || m.clir === 'show' ? m.clir : null, clirStatus: str(m.clirStatus) || null },
 		system: { moduleLoaded: tri(s.moduleLoaded), bridge: { running: tri(b.running), frames: num(b.frames), resyncs: num(b.resyncs),
 			txSkipped: num(b.txSkipped), maxGapUs: num(b.maxGapUs) } },
 		indicator: { led: str(i.led) || null, state: str(i.state) || null,
@@ -133,7 +139,13 @@ function normHealth(r) {
 		counters: { modemTimeouts: num(k.modemTimeouts), hookGapsOver20ms: num(k.hookGapsOver20ms),
 			hookGapMaxMs: num(k.hookGapMaxMs), faults: num(k.faults) },
 		machine: { greetingLoaded: tri(mc.greetingLoaded), greetingMs: Math.max(0, num(mc.greetingMs) || 0),
-			delaySec: Math.max(0, num(mc.delaySec) || 0) },
+			greetingError: str(mc.greetingError), delaySec: Math.max(0, num(mc.delaySec) || 0) },
+		/* what the quiet hours add up to right now: the windows are the settings', this is the answer they give */
+		quiet: { on: tri(q.on), cause: str(q.cause) || null, ask: str(q.ask) || null },
+		web: { mode: str((r.web || {}).mode) || null, audio: str((r.web || {}).audio) || null,
+			port: Math.max(0, num((r.web || {}).port) || 0) },
+		sip: { objectOwner: str(sp.objectOwner) || null, lastRefusal: str(sp.lastRefusal) || null,
+			consumerPid: num(sp.consumerPid) },
 		/* the folders as the daemon last checked them (start-up, a reload, a call's start) */
 		storage: {
 			recordings: { path: str(sr.path), ready: tri(sr.ready), freeMb: num(sr.freeMb), error: str(sr.error) || null },
@@ -204,7 +216,6 @@ function readSettings() {
 		page: { refreshSec: optInt('page_refresh_s', 1, 30, 1) },
 		machine: {
 			enabled: optText('machine_enabled', '0') === '1',
-			greeting: optText('machine_greeting', MACHINE_GREETING_DEF),
 			delaySec: optInt('machine_delay', 0, 60, 10),
 			path: optText('machine_path', MACHINE_PATH_DEF),
 			maxMb: optInt('machine_max_mb', 1, 4095, 50),
@@ -230,7 +241,9 @@ function readContacts() {
 				var type = i >= 0 ? String(t).slice(i + 1) : 'mobile';
 				return { value: i >= 0 ? String(t).slice(0, i) : String(t), type: CONTACT_TYPES[type] ? type : 'mobile' };
 			}),
-			quick: str(s.quick)
+			quick: str(s.quick),
+			/* the contact's own quiet-hours ask; only the word the daemon reads for yes is one (dnd.h) */
+			ringThrough: s.ring_through === '1'
 		};
 	});
 }
@@ -318,9 +331,127 @@ function validateAlarm(a) {
 	return null;
 }
 
+/*
+ * Quiet hours: UCI sections of type `dnd`, in the order the file writes them, because the first window that matches
+ * decides and an admin must be able to see that order. The always-ring numbers are the feature's, not one window's -
+ * a caller rings through whichever window is open - so the page reads every section's list as one and writes the
+ * whole of it onto the first section, which is where the daemon finds it. The window's own rules are the daemon's
+ * (dnd.h): a span of both ends unless all day, a mode of three words, a repeat time of 0..1440 minutes, at most
+ * eight windows, at most twenty written numbers.
+ */
+var QUIET_MAX = 8, QUIET_ALLOW_MAX = 20, QUIET_REPEAT_MAX = 1440;
+var QUIET_MODES = { silent: 1, machine: 1, reject: 1 };
+var QUIET_DAYS = [ [ 'mon', 1 ], [ 'tue', 2 ], [ 'wed', 3 ], [ 'thu', 4 ], [ 'fri', 5 ], [ 'sat', 6 ], [ 'sun', 7 ] ];
+var QUIET_TIME_RE = /^([01][0-9]|2[0-3]):([0-5][0-9])$/;
+var QUIET_EVERY = QUIET_DAYS.map(function(d) { return d[1]; });
+
+function quietIso(name) {
+	var hit = QUIET_DAYS.filter(function(d) { return d[0] === String(name).toLowerCase(); })[0];
+	return hit ? hit[1] : 0;
+}
+
+function quietName(iso) {
+	var hit = QUIET_DAYS.filter(function(d) { return d[1] === iso; })[0];
+	return hit ? hit[0] : null;
+}
+
+function readQuiet() {
+	return uci.sections(CONF, 'dnd').map(function(s) {
+		var names = listOf(s.days).map(quietIso).filter(Boolean);
+		var rep = parseInt(s.repeat_min, 10);
+		return {
+			id: s['.name'], enabled: s.enabled !== '0',
+			from: str(s.from), to: str(s.to), allDay: s.all_day === '1',
+			days: names.length ? names.sort(function(a, b) { return a - b; }) : QUIET_EVERY.slice(),
+			mode: QUIET_MODES[str(s.mode)] ? str(s.mode) : 'silent',
+			repeatMin: rep >= 0 && rep <= QUIET_REPEAT_MAX ? rep : 0,
+			allow: listOf(s.allow)
+		};
+	});
+}
+
+/* every section's list, in the order the file holds them, without a number twice */
+function readQuietAllow() {
+	var seen = {}, out = [];
+	uci.sections(CONF, 'dnd').forEach(function(s) {
+		listOf(s.allow).forEach(function(v) {
+			var one = String(v);
+			if (!seen[one]) {
+				seen[one] = 1;
+				out.push(one);
+			}
+		});
+	});
+	return out;
+}
+
+function validateQuiet(w, total) {
+	if (!w || typeof w.enabled !== 'boolean')
+		return _('The quiet-hours window is not valid');
+	if (!QUIET_MODES[w.mode])
+		return _('Choose what a quiet line does with the call');
+	if (!w.allDay && (!QUIET_TIME_RE.test(w.from) || !QUIET_TIME_RE.test(w.to)))
+		return _('Write the window as HH:MM at both ends, or mark it all day');
+	if (!(w.repeatMin >= 0 && w.repeatMin <= QUIET_REPEAT_MAX) || w.repeatMin !== Math.floor(w.repeatMin))
+		return _('The repeat time must be 0 to 1440 minutes');
+	if (!Array.isArray(w.days) || !w.days.length || !w.days.every(function(d) { return d >= 1 && d <= 7 && d === Math.floor(d); }))
+		return _('Pick at least one day');
+	if (!w.id && total >= QUIET_MAX)
+		return _('At most %d quiet-hours windows can be set').format(QUIET_MAX);
+	return null;
+}
+
+function validateQuietAllow(list) {
+	var re = /^\+?[0-9*#]{1,32}$/;
+	if (!Array.isArray(list))
+		return _('The always-ring list is not valid');
+	if (list.length > QUIET_ALLOW_MAX)
+		return _('At most %d numbers can always ring through').format(QUIET_ALLOW_MAX);
+	if (!list.every(function(v) { return re.test(String(v)) && String(v) !== '+'; }))
+		return _('Numbers may contain digits, *, # and a leading +');
+	return null;
+}
+
+/* what the file holds now: a save unloads the config, so a read-back after it has to load the file again -
+ * otherwise it reads the nothing that an unloaded config answers with, and a saved thing looks unsaved */
+function readQuietAgain() {
+	return uci.load(CONF).then(function() {
+		return { windows: readQuiet(), allow: readQuietAllow() };
+	});
+}
+
+/* one window, written as the daemon reads it: an all-day window keeps no span, and the weekday list is always explicit */
+function writeQuiet(id, w) {
+	uci.set(CONF, id, 'enabled', w.enabled ? '1' : '0');
+	if (w.allDay) {
+		uci.set(CONF, id, 'all_day', '1');
+		uci.unset(CONF, id, 'from');
+		uci.unset(CONF, id, 'to');
+	} else {
+		uci.unset(CONF, id, 'all_day');
+		uci.set(CONF, id, 'from', w.from);
+		uci.set(CONF, id, 'to', w.to);
+	}
+	uci.set(CONF, id, 'days', w.days.map(quietName));
+	uci.set(CONF, id, 'mode', w.mode);
+	uci.set(CONF, id, 'repeat_min', String(w.repeatMin));
+}
+
+/* the whole list onto the first section, off every other one: one list, held where the daemon looks */
+function writeQuietAllow(id, list) {
+	uci.sections(CONF, 'dnd').forEach(function(s) {
+		if (s['.name'] === id)
+			return;
+		uci.unset(CONF, s['.name'], 'allow');
+	});
+	if (list.length)
+		uci.set(CONF, id, 'allow', list);
+	else
+		uci.unset(CONF, id, 'allow');
+}
+
 /* call forwarding: the first UCI section of type forwarding is the setting; the network's own report comes from the daemon (forwarding_get) */
 var FWD_WHEN = [ 'always', 'busy', 'noanswer', 'unreachable', 'all_conditional' ];
-
 function netWord(v) { return v === 'on' || v === 'off' ? v : 'unknown'; }
 
 function readForwarding() {
@@ -399,8 +530,7 @@ function validate(p) {
 			return _('The indicator off-hook blink rate must be 200 to 10000 ms');
 	}
 	if (p.machine != null) {
-		if (typeof p.machine.greeting !== 'string' || p.machine.greeting.charAt(0) !== '/' || p.machine.greeting.length >= 128)
-			return _('The greeting file must be an absolute path shorter than 128 characters');
+		/* the greeting has no path to check: it is one constant file the daemon owns (machine.h), managed by the card */
 		if (typeof p.machine.path !== 'string' || p.machine.path.charAt(0) !== '/' || /^\/+$/.test(p.machine.path) || p.machine.path.length >= 128)
 			return _('The message folder must be an absolute path shorter than 128 characters and not the root');
 		if (!(p.machine.delaySec >= 0 && p.machine.delaySec <= 60))
@@ -419,7 +549,7 @@ return baseclass.extend({
 	available: AVAILABLE,
 	downStatus: downStatus,
 
-	/* ---- live (M4) ---- */
+	/* ---- live ---- */
 
 	getStatus: function() {
 		return bus.status().then(normStatus, function(e) { throw fail(e); });
@@ -460,7 +590,7 @@ return baseclass.extend({
 		return uci.load(CONF).then(readSettings, function(e) { throw fail(e); });
 	},
 
-	/* writes the options of the milestone that exists and applies them; the other fields are left as they are */
+	/* writes the options this build serves and applies them; the other fields are left as they are */
 	savePhoneSettings: function(p) {
 		var msg = validate(p);
 		if (msg)
@@ -504,7 +634,9 @@ return baseclass.extend({
 
 			if (p.machine != null) {
 				put('machine_enabled', p.machine.enabled ? '1' : '0');
-				put('machine_greeting', p.machine.greeting);
+				/* the greeting's path is retired: the daemon reads one constant file and the card manages it. A line
+				 * the config still carries from an older release is removed here rather than left to look meaningful */
+				put('machine_greeting', null);
 				put('machine_delay', p.machine.delaySec);
 				put('machine_path', p.machine.path);
 				put('machine_max_mb', p.machine.maxMb);
@@ -567,7 +699,7 @@ return baseclass.extend({
 				return {
 					id: num(c.id), type: c.type === 'OUT' || c.type === 'MISS' ? c.type : 'IN', number: str(c.number), name: str(c.name),
 					ts: num(c.ts) || 0, durationSec: Math.max(0, num(c.durationSec) || 0), recording: str(c.recording),
-					message: str(c.message), result: str(c.result), cause: num(c.cause) || 0
+					message: str(c.message), result: str(c.result), answeredBy: str(c.answeredBy), cause: num(c.cause) || 0
 				};
 			});
 		}, function(e) { throw fail(e); });
@@ -609,8 +741,12 @@ return baseclass.extend({
 				uci.set(CONF, id, 'quick', c.quick);
 			else
 				uci.unset(CONF, id, 'quick');
+			if (c.ringThrough)
+				uci.set(CONF, id, 'ring_through', '1');
+			else
+				uci.unset(CONF, id, 'ring_through');
 			return storeConfig().then(function() {
-				return { id: id, name: c.name.trim(), numbers: c.numbers, quick: c.quick || '' };
+				return { id: id, name: c.name.trim(), numbers: c.numbers, quick: c.quick || '', ringThrough: !!c.ringThrough };
 			});
 		}).then(null, function(e) { throw e && e.message ? e : fail(e); });
 	},
@@ -695,6 +831,65 @@ return baseclass.extend({
 		}).then(null, function(e) { throw e && e.message ? e : fail(e); });
 	},
 
+	/* quiet hours: the windows in the order the file writes them, and the numbers that ring through them all */
+	listQuiet: function() {
+		uci.unload(CONF);
+		return uci.load(CONF).then(function() {
+			return { windows: readQuiet(), allow: readQuietAllow() };
+		}, function(e) { throw fail(e); });
+	},
+
+	/* id 0 (or none) adds a window; returns the window as the file holds it now */
+	saveQuiet: function(w) {
+		uci.unload(CONF);
+		return uci.load(CONF).then(function() {
+			var all = readQuiet(), id = w && w.id ? String(w.id) : '';
+			var msg = validateQuiet(w, all.length);
+			if (msg)
+				throw new Error(msg);
+			if (!id) {
+				id = uci.add(CONF, 'dnd');
+			} else if (!all.some(function(o) { return o.id === id; })) {
+				throw new Error(_('This quiet-hours window no longer exists'));
+			}
+			writeQuiet(id, w);
+			return storeConfig().then(readQuietAgain).then(function(r) {
+				return r.windows.filter(function(o) { return o.id === id; })[0];
+			});
+		}).then(null, function(e) { throw e && e.message ? e : fail(e); });
+	},
+
+	removeQuiet: function(id) {
+		uci.unload(CONF);
+		return uci.load(CONF).then(function() {
+			var all = readQuiet(), list = readQuietAllow();
+			var rest = all.filter(function(o) { return o.id !== String(id); });
+			if (!all.some(function(o) { return o.id === String(id); }))
+				throw new Error(_('This quiet-hours window no longer exists'));
+			uci.remove(CONF, String(id));
+			/* the numbers are the feature's own, not the deleted window's: they move to the window that comes first
+			 * now, so a caller written down to ring through keeps ringing through */
+			if (list.length && rest.length)
+				writeQuietAllow(rest[0].id, list);
+			return storeConfig().then(function() { return { ok: true, refused: null }; });
+		}).then(null, function(e) { throw e && e.message ? e : fail(e); });
+	},
+
+	/* one write of the whole always-ring list; it is held beside a window, because that is where the daemon reads it */
+	saveQuietAllow: function(list) {
+		var msg = validateQuietAllow(list);
+		if (msg)
+			return bad(msg);
+		uci.unload(CONF);
+		return uci.load(CONF).then(function() {
+			var all = readQuiet();
+			if (!all.length)
+				throw new Error(_('Add a quiet-hours window first - the numbers are held beside one.'));
+			writeQuietAllow(all[0].id, list);
+			return storeConfig().then(readQuietAgain).then(function(r) { return r.allow; });
+		}).then(null, function(e) { throw e && e.message ? e : fail(e); });
+	},
+
 	getForwarding: function() {
 		uci.unload(CONF);
 		return Promise.all([ uci.load(CONF).then(readForwarding), bus.forwardingGet().then(null, function() { return {}; }) ]).then(function(r) {
@@ -724,8 +919,6 @@ return baseclass.extend({
 			return { enabled: f.enabled, to: f.to, when: f.when, delaySec: f.delaySec, network: netWord(r.network) };
 		}, function(e) { throw e && e.message ? e : fail(e); });
 	},
-
-	/* ---- later milestones: nothing to call yet ---- */
 
 
 	settingsLive: SETTINGS_LIVE

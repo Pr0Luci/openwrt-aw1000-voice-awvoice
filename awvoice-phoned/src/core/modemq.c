@@ -6,7 +6,7 @@
 
 #include "modemq.h"
 
-const char *const modemq_command[] = { "AT+QDAI?", "AT+CLVL=?", "AT+CPIN?", "AT+CEREG?", "AT+QCFG=\"ims\"", "AT+QCSQ", "AT+QNWINFO", "AT+CLIR?" };
+const char *const modemq_command[] = { "AT+QDAI?", "AT+CLVL=?", "AT+CPIN?", "AT+CEREG?", "AT+QCFG=\"ims\"", "AT+QCSQ", "AT+QNWINFO", "AT+CLIR?", "AT+COPS?" };
 const unsigned int modemq_count = sizeof(modemq_command) / sizeof(modemq_command[0]);
 
 /* the text after the tag, skipping the blanks; NULL when the tag is absent */
@@ -155,6 +155,64 @@ void modemq_network(const char *reply, char *network, size_t ncap, char *band, s
 		band[0] = 0;
 }
 
+/* the n-th (0-based) field of the reply line at p, counting commas; NULL when the line has fewer fields */
+static const char *field_at(const char *p, unsigned int n)
+{
+	for (; n; n--) {
+		p = strchr(p, ',');
+		if (!p)
+			return NULL;
+		p++;
+	}
+	return p;
+}
+
+int modemq_operator(const char *reply, const char *tag, unsigned int at, char *mcc, size_t cap, char *name, size_t ncap)
+{
+	const char *p = after(reply, tag);
+	char field[MQ_NETWORK_MAX];
+	const char *f;
+	size_t n;
+
+	if (cap)
+		mcc[0] = 0;
+	if (ncap)
+		name[0] = 0;
+	if (!p || !cap || cap < MQ_MCC_MAX)
+		return -1;					/* nothing was answered */
+	/* the operator field of the reply: quoted in the name formats, plain digits in the numeric one (TS 27.007 +COPS
+	 * read after AT+COPS=3,0, and the modem's own +QNWINFO, which prints the PLMN it is camped on as digits) */
+	f = field_at(p, at);
+	if (!f || !*f || *f == '\r' || *f == '\n')
+		return -1;					/* the reply names no operator: nothing selected yet */
+	n = strcspn(f, "\r\n,");
+	if (n >= sizeof(field))
+		n = sizeof(field) - 1;
+	memcpy(field, f, n);
+	field[n] = 0;
+	/* the field as the modem printed it, without the quotes a name form carries */
+	if (field[0] == '"') {
+		f = field + 1;
+		n = strcspn(f, "\"");
+	} else
+		f = field;
+	if (ncap) {
+		size_t copy = n < ncap - 1 ? n : ncap - 1;
+
+		memcpy(name, f, copy);
+		name[copy] = 0;
+	}
+	if (n != 5 && n != 6)
+		return 0;					/* a name, or digits of another length: no country code in it */
+	if (f[0] < '0' || f[0] > '9' || f[1] < '0' || f[1] > '9' || f[2] < '0' || f[2] > '9')
+		return 0;
+	memcpy(mcc, f, 3);
+	mcc[3] = 0;
+	if (ncap)
+		name[0] = 0;					/* digits were read: nothing to say about a name */
+	return 1;
+}
+
 int modemq_audio_slave(const char *reply)
 {
 	const char *p = after(reply, "+QDAI:");
@@ -164,6 +222,18 @@ int modemq_audio_slave(const char *reply)
 		return MQ_UNKNOWN;
 	/* <io>,<mode>,...: the first field prints as "x" on this modem; the second is 1 for slave, 0 for master */
 	mode = field_int(p, 1);
+	return mode == 0 || mode == 1 ? mode : MQ_UNKNOWN;
+}
+
+int modemq_audio_rate(const char *reply)
+{
+	const char *p = after(reply, "+QDAI:");
+	int mode;
+
+	if (!p)
+		return MQ_UNKNOWN;
+	/* <id>,<mode>,<mclk>,<fs>,<busy>,<pcm_mode>,...: the sixth field, 0 = 8 kHz per slot, 1 = 16 kHz (two samples) */
+	mode = field_int(p, 5);
 	return mode == 0 || mode == 1 ? mode : MQ_UNKNOWN;
 }
 

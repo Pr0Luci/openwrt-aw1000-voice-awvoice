@@ -7,7 +7,7 @@
 #include <time.h>
 
 /*
- * Alarm calls (the page's U26): the phone rings at a set time on chosen days, without a caller. Pure data and the time test; the line
+ * Alarm calls: the phone rings at a set time on chosen days, without a caller. Pure data and the time test; the line
  * rings it (call.c) and the front end supplies the clock. Days are numbered 1 = Monday .. 7 = Sunday (the page's numbering).
  */
 #define ALARM_MAX	20

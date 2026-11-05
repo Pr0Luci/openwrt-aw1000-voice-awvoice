@@ -35,6 +35,14 @@ start_service() {
 			logger -t awvoice "installed the default board file at $board"
 	fi
 	[ -r "$board" ] || { logger -t awvoice "board file $board missing"; return 1; }
+	# the greeting the answering machine plays is one fixed file (the daemon's machine.h names the same place): the
+	# package ships a default, and the first start that finds nothing there copies it in. A greeting someone recorded or
+	# uploaded is never written over, by this or by an upgrade - the machine plays what the household put there.
+	if [ ! -e /etc/awvoice/greeting.wav ] && [ -r /usr/share/awvoice/greeting-default.wav ]; then
+		mkdir -p /etc/awvoice
+		cp /usr/share/awvoice/greeting-default.wav /etc/awvoice/greeting.wav && chmod 600 /etc/awvoice/greeting.wav && \
+			logger -t awvoice "installed the default greeting at /etc/awvoice/greeting.wav"
+	fi
 	# the kernel module package (kmod-awvoice-fxs) loads awvoice_fxs at boot from /etc/modules.d, after the overlay is
 	# mounted, with register writes allowed (the package's MODPARAMS line); if it was unloaded since, it is loaded again
 	# the same way (the parameter is fixed at load time)

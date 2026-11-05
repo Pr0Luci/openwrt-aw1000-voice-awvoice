@@ -9,7 +9,7 @@
 #include "phone.h"
 
 /*
- * Call blocking (the page's U19..U21): exact numbers and number prefixes, for incoming and for outgoing calls, and one switch for
+ * Call blocking: exact numbers and number prefixes, for incoming and for outgoing calls, and one switch for
  * callers who withhold their number. Numbers are compared in international form (numbers.h), so a rule typed as a national number
  * matches a caller shown with the country code. An emergency number is never blocked: number_is_emergency() decides first and wins.
  * Pure data and decisions; the daemon fills it from the UCI section of type `blocking`.

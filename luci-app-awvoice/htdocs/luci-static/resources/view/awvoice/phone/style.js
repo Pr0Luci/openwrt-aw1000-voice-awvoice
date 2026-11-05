@@ -49,13 +49,92 @@ var CSS = [
 '.avp fieldset.av-fs{border:0;padding:0;margin:0;min-width:0}',
 '.avp fieldset.av-fs[disabled]{opacity:.55}',
 
-/* status banner */
-'.avp .av-ban{display:flex;gap:10px;align-items:center;padding:9px 12px;margin:0 0 12px;border:1px solid var(--av-bd);',
-'border-left:3px solid var(--av-ok);border-radius:var(--av-r);background:var(--av-card)}',
-'.avp .av-ban .av-i{font-size:20px;color:var(--av-ok)}.avp .av-ban>div{flex:1;min-width:0}',
-'.avp .av-ban.w{border-left-color:var(--av-warn)}.avp .av-ban.w>.av-i{color:var(--av-warn)}',
-'.avp .av-ban.e{border-left-color:var(--av-err)}.avp .av-ban.e>.av-i{color:var(--av-err)}',
+/* the SIP call panel: a dial row, the action strip and the keypad */
+'.avp .av-dial{display:flex;gap:8px;align-items:center;margin:10px 0 0}',
+'.avp .av-dial input{flex:1;min-width:0}',
+'.avp .av-pad{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;max-width:300px;margin:10px 0 0}',
+'.avp .av-pad button{min-height:38px;font-size:15px;font-variant-numeric:tabular-nums}',
+'.avp .av-h4{font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--av-mut);margin:16px 0 2px}',
+/* the phone's call grid and keypad, and the SIP tab's cards */
+'.avp .av-sub{margin:0 0 14px}',
+'.avp .av-callgrid{display:grid;gap:12px;grid-template-columns:minmax(0,7fr) minmax(0,5fr);align-items:start}',
+'.avp .av-svcgrid{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}',
+'.avp .av-pad{max-width:340px}',
+'.avp .av-key{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:46px;padding:2px 0;',
+'font-size:17px;font-weight:600;line-height:1.1}',
+'.avp .av-key .l{font-size:9px;font-weight:400;letter-spacing:.5px;color:var(--av-mut);min-height:10px}',
+'.avp .av-dial .cbi-button{white-space:nowrap}',
+/* the installed service: status chips, one collapsible card per direction */
+'.avp .av-statuschips{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 0}',
+'.avp .av-statuschip{display:inline-flex;gap:6px;align-items:center;padding:4px 10px;border:1px solid var(--av-bd2);',
+'border-radius:12px;background:transparent;color:var(--av-fg);font:inherit;font-size:12px;cursor:pointer}',
+'.avp .av-statuschip .dot{width:8px;height:8px;border-radius:50%;background:var(--av-mut)}',
+'.avp .av-statuschip.ok .dot{background:var(--av-ok)}.avp .av-statuschip.unk .dot{background:var(--av-warn)}',
+'.avp .av-statuschip.err .dot{background:var(--av-err)}',
+'.avp .av-statuschip.static{cursor:default}',
+'.avp .av-dirgrid{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}',
+'.avp details.av-dir>summary{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;justify-content:flex-start;',
+'font-weight:600;cursor:pointer;color:var(--av-fg)}',
+'.avp details.av-dir>summary .av-dir-t{flex:0 1 auto}',
+'.avp details.av-dir>summary .av-dir-s{color:var(--av-mut);font-weight:400;font-size:12px}',
+'.avp details.av-dir[open]>summary{margin-bottom:8px}',
+/* a card that is always open: its state line and its switch sit in the title row's right slot,
+   where another card keeps its refresh button */
+'.avp .cbi-section h3 .av-dir-s{font-weight:400;font-size:12px}',
+'.avp .cbi-section h3 .av-r .av-sw{margin:0}',
+/* a folded part inside a card: a rule above it, not a second card */
+'.avp .cbi-section details.av-dir{margin-top:12px;border-top:1px solid var(--av-bd);padding-top:6px}',
+/* a form's actions stay in the framework's own action bar: the theme draws the row and the buttons the way it draws
+   every page's. the one row that is not a page footer (the mode pick and its button on one line) takes the
+   container's padding and alignment back to its own */
+'.avp .av-moderow{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:10px 0 0;padding:0;text-align:start}',
+'.avp .av-moderow.cbi-page-actions{justify-content:flex-start}',
+'.avp .av-modesel{flex:0 1 320px;min-width:0}',
+'.avp .av-modesel label{display:block;margin:0 0 4px;font-weight:600}',
+'.avp .av-modesel select{width:100%}',
+/* the form of a direction: the fields in a grid, the label above the control */
+'.avp .av-fgrid{display:grid;gap:12px 16px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin:10px 0 0}',
+'.avp .av-ffld{display:flex;flex-direction:column;gap:3px;min-width:0}',
+'.avp .av-ffld-t{font-size:12px;font-weight:600;color:var(--av-mut)}',
+'.avp .av-ffld-c{min-width:0}',
+'.avp .av-ffld-c input[type=text],.avp .av-ffld-c input[type=number],.avp .av-ffld-c input[type=password],',
+'.avp .av-ffld-c select{width:100%}',
+'.avp .av-ffld-c .av-inline{width:100%}',
+'.avp .av-ffld-c .av-inline input[type=text],.avp .av-ffld-c .av-inline input[type=password]{flex:1 1 120px;min-width:0}',
+'.avp .av-ffld-c .av-inline input[type=number]{flex:0 0 88px;width:88px}',
+'.avp .av-ffld-c .av-inline .av-port{flex:0 0 96px;width:96px}',
+'.avp .av-ffld-h{font-size:11px;color:var(--av-mut);line-height:1.35}',
+/* a field that carries two switches and a name under them */
+'.avp .av-stack{display:flex;flex-direction:column;gap:6px;align-items:flex-start;width:100%}',
+'.avp .av-stack input[type=text]{width:100%}',
+/* the switch in a card's summary: the theme draws the switch, the page gives it the place */
+'.avp .av-sw{display:inline-flex;align-items:center;margin-left:auto;cursor:pointer}',
+'.avp .av-sw input[type=checkbox]{margin:0}',
+/* the number field and the keypad end on the same right bound; the two call controls share the rail's whole
+   height beside them, one half each */
+'.avp .av-padwrap{display:grid;grid-template-columns:minmax(0,1fr) 108px;gap:10px;align-items:stretch;margin:10px 0 0}',
+'.avp .av-dialcol{display:flex;flex-direction:column;min-width:0}',
+'.avp .av-dialcol .av-dial{margin:0 0 10px}',
+'.avp .av-padwrap .av-pad{margin:0;max-width:none}',
+'.avp .av-rail{display:grid;grid-template-rows:repeat(3,minmax(0,1fr));gap:6px;min-height:0}',
+'.avp .av-railbtn{height:100%;min-height:0;flex-direction:column;gap:4px;padding:6px}',
+'.avp .av-railbtn .av-i{font-size:24px}',
+'.avp .av-railbtn span:last-child{font-size:14px;font-weight:600;line-height:1.15}',
+'.avp .av-railbtn:disabled{opacity:.6;filter:grayscale(1);background:var(--av-sub);border-color:var(--av-bd);',
+'color:var(--av-mut);cursor:not-allowed}',
+/* the browser audio's level meter */
+'.avp .av-meter{height:6px;margin:8px 0 0;border:1px solid var(--av-bd);border-radius:3px;background:var(--av-sub);overflow:hidden}',
+'.avp .av-meter span{display:block;height:100%;width:0;background:var(--av-ok);transition:width .1s linear}',
+
+/* status banner: the box, its colours and the state tint belong to the framework's own message box, which
+   every theme paints - the page only lays the icon and the two lines out inside it */
+'.avp .av-ban{display:flex;gap:10px;align-items:center;margin:0 0 12px}',
+'.avp .av-ban .av-i{font-size:20px;flex:none}.avp .av-ban>div:not(.av-ban-num){flex:1;min-width:0}',
 '.avp .av-ban .av-sub{color:var(--av-mut)}',
+/* the number at the end of the state card: one column of two rows, stuck to the card's right edge, read left */
+'.avp .av-ban-num{margin-left:auto;text-align:start;min-width:0;padding-inline-start:12px}',
+'.avp .av-ban-num>div:first-child{font-size:11px;color:var(--av-mut)}',
+'.avp .av-ban-num>div:last-child{font-weight:600}',
 
 /* cards and grids */
 '.avp .cbi-section h3,.avp .av-h{display:flex;flex-wrap:wrap;gap:8px;align-items:center}',
@@ -63,7 +142,8 @@ var CSS = [
 '.avp .av-g2,.avp .av-g3{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(0,1fr))}',
 '.avp .av-g3{grid-template-columns:repeat(3,minmax(0,1fr))}',
 '.avp .av-tiles{display:grid;gap:10px;grid-template-columns:repeat(4,minmax(0,1fr));margin:0 0 12px}',
-'.avp .av-tile{padding:9px 11px;min-width:0;border:1px solid var(--av-bd);border-radius:var(--av-r);background:var(--av-sub)}',
+/* the box, its border and its radius are the framework card's; the page sets only the measure of the inside */
+'.avp .av-tile{min-width:0;padding:9px 11px}',
 '.avp .av-tile small{display:block;color:var(--av-mut);font-size:11px}',
 '.avp .av-tile b{display:flex;gap:6px;align-items:center;font-weight:600;font-size:13px}',
 '.avp .av-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--av-ok)}',
@@ -93,12 +173,13 @@ var CSS = [
 
 /* buttons, chips, filter bar */
 '.avp .av-chip{min-height:var(--av-chip)}',
-'.avp .av-btn{display:inline-flex;gap:6px;align-items:center;justify-content:center}',
+/* a row of pills is a tab row: the theme gives it the same panel it gives the page's own tab bar above it */
 '.avp .av-chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}',
 '.avp .av-chip{display:inline-flex;gap:6px;align-items:center;padding:3px 12px;border:1px solid var(--av-bd2);border-radius:14px;',
 'background:transparent;color:var(--av-fg);font:inherit;font-size:12px;cursor:pointer}',
 '.avp .av-chip[aria-pressed=true]{background:var(--av-dim);border-color:var(--av-ac);color:var(--av-ac)}',
 '.avp .av-chip:focus-visible,.avp .av-row:focus-visible{outline:2px solid var(--av-ac);outline-offset:1px}',
+/* the box, its border and its radius are the framework card's; here only the measure of the row is the page's */
 '.avp .av-fl{display:grid;gap:8px;align-items:center;margin:0 0 10px;grid-template-columns:minmax(0,1fr) 150px auto auto}',
 '.avp .av-fl input,.avp .av-fl select{width:100%;min-width:0;max-width:100%}',
 
@@ -139,21 +220,28 @@ var CSS = [
 '.avp .av-err-msg{color:var(--av-err);min-height:1.2em;margin:4px 0 0}',
 
 /* log */
-'.avp .av-log{max-height:160px;overflow:auto;padding:8px;white-space:pre-wrap;word-break:break-all;font-size:12px;',
-'color:var(--av-mut);background:var(--av-sub);border:1px solid var(--av-bd);border-radius:var(--av-r)}',
+/* the log block takes its surface from the framework's own text field: only the reading of it is the page's */
+'.avp .av-log{max-height:160px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:12px;',
+'color:var(--av-mut)}',
 '.avp details>summary{cursor:pointer;color:var(--av-ac);display:flex;align-items:center;min-height:var(--av-chip)}',
+/* the code a phone scans: the framework's own renderer draws the square, and the page only sizes and centres
+   it - the code carries its own light ground, so the theme's panel shows around it, not through it */
+'.avp .av-qr{display:flex;justify-content:center;margin:6px 0 0}',
+'.avp .av-qr svg{width:212px;height:212px}',
+'.avp .av-qr-url{margin:8px 0 0;text-align:center;overflow-wrap:anywhere;font-size:12px}',
 
-/* toast */
-'.av-toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:3000;max-width:90vw;padding:8px 14px;',
-'border:1px solid var(--ax-accent,var(--primary-color-high,currentColor));border-radius:var(--ax-r,4px);',
-'background:var(--ax-card2,var(--background-color-high,Canvas));color:var(--ax-fg,var(--text-color-high,CanvasText))}',
+/* the message of a moment: the theme paints its box like every other message box, the page only places it */
+'.av-toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:3000;max-width:90vw;margin:0}',
 '.av-toast[hidden]{display:none}',
 
 /* tab bar: keep it on one scrolling line on narrow screens */
 '.avp .cbi-tabmenu{overflow-x:auto;overflow-y:hidden;white-space:nowrap;flex-wrap:nowrap}',
 '.avp .cbi-tabmenu li{flex:none}',
 '.avp .cbi-tabmenu li a .av-i{margin-right:6px;opacity:.85}',
-'.avp div[data-tab]{padding-top:10px}',
+/* the tab pane's own breathing room, on the pane that is in view only: every pane lives in the page at once, and a
+   rule that reached the hidden ones would add its space to each of them, so the gap under the tab bar would grow
+   with the tab's place in the row */
+'.avp div[data-tab][data-tab-active=true]{padding-top:20px}',
 
 /* wide: side detail panel, inline expander off */
 '@container avp (min-width:1024px){',
@@ -166,14 +254,18 @@ var CSS = [
 '@media (max-width:1023px){.avp{--av-chip:32px;--av-row:52px;--av-it:48px}}',
 
 '@container avp (max-width:700px){',
-'.avp .av-g2,.avp .av-g3{grid-template-columns:minmax(0,1fr)}',
+'.avp .av-g2,.avp .av-g3,.avp .av-callgrid,.avp .av-svcgrid,.avp .av-dirgrid{grid-template-columns:minmax(0,1fr)}',
 '.avp .av-fl{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}',
 '.avp .av-fl .q{grid-column:1/-1}',
 '.avp .av-big{font-size:24px}',
 '.avp .av-inline input.wide{width:100%}}',
 
 '@container avp (max-width:420px){',
-'.avp .av-kv{flex-direction:column;gap:0}.avp .av-kv>span:last-child{text-align:left}}',
+'.avp .av-kv{flex-direction:column;gap:0}.avp .av-kv>span:last-child{text-align:left}',
+'.avp .av-key{min-height:54px;font-size:19px}',
+'.avp .av-padwrap{grid-template-columns:minmax(0,1fr) 96px}',
+'.avp .av-railbtn .av-i{font-size:21px}',
+'.avp .av-railbtn span:last-child{font-size:13px}}',
 
 '@media (prefers-reduced-motion:reduce){.avp *{transition:none!important;animation:none!important}}'
 ].join('');

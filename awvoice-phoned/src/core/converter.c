@@ -22,7 +22,7 @@ static int ram_get(struct conv *v, unsigned int addr, uint32_t *value)
 	return chip_ram_read(v->chip, v->ch, addr, value);
 }
 
-/* write, then read back: a control word that does not hold means the converter is not under our control */
+/* write, then read back: a control word that does not hold means the converter is not under the driver's control */
 static int ram_put(struct conv *v, unsigned int addr, uint32_t value)
 {
 	uint32_t back;

@@ -5,7 +5,7 @@
 'require ui';
 
 /*
- * editors.js - modal editors (contact, alarm, number list, speed dial, confirm) shared by the Rules, Calls and Phone
+ * editors.js - modal editors (contact, alarm, quiet-hours window, number list, speed dial, confirm) shared by the Rules, Calls and Phone
  * settings tabs. Each editor validates input, calls the matching api method and reports the saved record through
  * onSaved(). Rejections from the api are shown inside the modal.
  */
@@ -18,7 +18,7 @@ var QUICK_RE = /^[0-9]{2}$/;
 var TIME_RE = /^([01][0-9]|2[0-3]):([0-5][0-9])$/;
 
 function modal(ctx, title, rows, errNode, onSave, saveLabel) {
-	var save = E('button', { 'class': 'cbi-button cbi-button-save important', 'type': 'button' }, saveLabel || _('Save'));
+	var save = E('button', { 'class': 'cbi-button cbi-button-positive important', 'type': 'button' }, saveLabel || _('Save'));
 	var cancel = E('button', { 'class': 'cbi-button', 'type': 'button', 'click': ui.hideModal }, _('Cancel'));
 
 	save.addEventListener('click', function() {
@@ -52,6 +52,7 @@ return baseclass.extend({
 		var u = ctx.ui, types = [ [ 'mobile', _('Mobile') ], [ 'home', _('Home') ], [ 'work', _('Work') ] ];
 		var name = u.text(c ? c.name : '', _('Name'));
 		var quick = u.text(c ? c.quick : '', _('2 digits, optional'), 'av-mono');
+		var through = u.checkbox(c ? c.ringThrough : false, _('Ring through quiet hours'));
 		var err = E('div', { 'class': 'av-err-msg', 'role': 'alert' });
 		var numRows = [];
 		var seed = c ? c.numbers : [ { value: prefillNumber || '', type: 'mobile' } ];
@@ -79,7 +80,9 @@ return baseclass.extend({
 			row(_('Numbers (up to %d)').format(MAX_NUMBERS), numbers),
 			E('div', { 'class': 'av-modalrow' }, more),
 			row(_('Speed dial code'), quick),
-			E('div', { 'class': 'av-note' }, _('Dial the two digits and then # to call this contact.'))
+			E('div', { 'class': 'av-modalrow' }, through.node),
+			E('div', { 'class': 'av-note' }, _('Dial the two digits and then # to call this contact.')),
+			E('div', { 'class': 'av-note' }, _('A caller who rings through is let past quiet hours on every number this contact holds.'))
 		], err, function() {
 			err.textContent = '';
 			var list = [];
@@ -98,7 +101,7 @@ return baseclass.extend({
 				err.textContent = _('Speed dial code must be exactly 2 digits');
 				return false;
 			}
-			return ctx.api.saveContact({ id: c ? c.id : 0, name: name.value, numbers: list, quick: q }).then(function(saved) {
+			return ctx.api.saveContact({ id: c ? c.id : 0, name: name.value, numbers: list, quick: q, ringThrough: through.get() }).then(function(saved) {
 				ctx.refreshContacts().then(function() { if (onSaved) onSaved(saved); });
 			});
 		});
@@ -180,6 +183,67 @@ return baseclass.extend({
 		});
 	},
 
+	/*
+	 * One quiet-hours window. `allDay` is what the daemon's own word for a window without a span is; the two times are
+	 * asked for only when it is not. The days are written out in full, so a window the file leaves open as "every day"
+	 * comes back as the seven names rather than as nothing.
+	 */
+	quiet: function(ctx, w, onSaved) {
+		var u = ctx.ui;
+		var modes = [ [ 'silent', _('Keep the line silent') ], [ 'machine', _('Let the answering machine take it') ], [ 'reject', _('Release the caller') ] ];
+		var dayNames = [ _('Mon'), _('Tue'), _('Wed'), _('Thu'), _('Fri'), _('Sat'), _('Sun') ];
+		var err = E('div', { 'class': 'av-err-msg', 'role': 'alert' });
+		var enabled = u.checkbox(w ? w.enabled : true, _('Window is on'));
+		var allDay = u.checkbox(w ? w.allDay : false, _('All day'));
+		var from = u.text(w ? w.from : '22:00', 'HH:MM', 'av-mono');
+		var to = u.text(w ? w.to : '07:00', 'HH:MM', 'av-mono');
+		var mode = u.select(modes, w ? w.mode : 'machine');
+		var repeat = u.text(w ? String(w.repeatMin) : '15', _('minutes'), 'av-mono');
+		var selected = w ? w.days : [ 1, 2, 3, 4, 5, 6, 7 ];
+		var boxes = dayNames.map(function(n, i) { return u.checkbox(selected.indexOf(i + 1) >= 0, n); });
+		var span = E('div', { 'class': 'av-inline' }, [ from, E('span', '–'), to ]);
+
+		repeat.maxLength = 4;
+		/* a window marked all day has no span to read, so the two fields go with the mark that replaces them */
+		function showSpan() {
+			span.hidden = allDay.get();
+		}
+		allDay.input.addEventListener('change', showSpan);
+		showSpan();
+
+		modal(ctx, w ? _('Edit quiet hours') : _('Add quiet hours'), [
+			E('div', { 'class': 'av-modalrow' }, enabled.node),
+			row(_('Hours'), span),
+			E('div', { 'class': 'av-modalrow' }, allDay.node),
+			row(_('Days'), E('div', { 'class': 'av-days' }, boxes.map(function(b) { return b.node; }))),
+			row(_('A call that arrives'), mode),
+			row(_('Ring again within'), repeat),
+			E('div', { 'class': 'av-note' }, _('The same caller ringing a second time inside this many minutes is let through. Zero turns the answer off.')),
+			E('div', { 'class': 'av-note' }, _('A window that ends before it begins runs through midnight.'))
+		], err, function() {
+			err.textContent = '';
+			var days = [];
+			boxes.forEach(function(b, i) { if (b.get()) days.push(i + 1); });
+			if (!allDay.get() && (!TIME_RE.test(from.value.trim()) || !TIME_RE.test(to.value.trim()))) {
+				err.textContent = _('Write both ends as HH:MM, for example 22:00 and 07:00');
+				return false;
+			}
+			if (!days.length) {
+				err.textContent = _('Pick at least one day');
+				return false;
+			}
+			var rep = parseInt(repeat.value.trim(), 10);
+			if (isNaN(rep) || rep < 0 || rep > 1440) {
+				err.textContent = _('The repeat time must be 0 to 1440 minutes');
+				return false;
+			}
+			return ctx.api.saveQuiet({
+				id: w ? w.id : 0, enabled: enabled.get(), allDay: allDay.get(),
+				from: from.value.trim(), to: to.value.trim(), days: days, mode: mode.value, repeatMin: rep
+			}).then(function(saved) { if (onSaved) onSaved(saved); });
+		});
+	},
+
 	/* Pick an existing contact and give it a speed dial code. */
 	speedDial: function(ctx, onSaved) {
 		var u = ctx.ui;
@@ -205,7 +269,8 @@ return baseclass.extend({
 				return false;
 			}
 			var c = free.filter(function(x) { return String(x.id) === who.value; })[0];
-			return ctx.api.saveContact({ id: c.id, name: c.name, numbers: c.numbers, quick: q }).then(function(saved) {
+			/* the contact is rewritten whole, so the quiet-hours mark it already carries goes with it */
+			return ctx.api.saveContact({ id: c.id, name: c.name, numbers: c.numbers, quick: q, ringThrough: c.ringThrough }).then(function(saved) {
 				ctx.refreshContacts().then(function() { if (onSaved) onSaved(saved); });
 			});
 		});

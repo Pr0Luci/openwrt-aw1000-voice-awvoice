@@ -18,7 +18,7 @@ define Package/awvoice-phoned
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=AWvoice phone daemon (RJ11 phone port: calls, tones, caller id, ubus awvoice)
-  DEPENDS:=+libubox +libubus +libuci +kmod-awvoice-fxs
+  DEPENDS:=+libubox +libubus +libuci +libmbedtls +kmod-awvoice-fxs
 endef
 
 define Package/awvoice-phoned/description
@@ -26,6 +26,8 @@ define Package/awvoice-phoned/description
   identity, call control through the modem's AT port, the ubus object awvoice and the settings in UCI awvoice. The board
   file /etc/awvoice/board.bin ships with this package (the default is installed at the first start; a file already there
   is never overwritten) - configuration data only, no chip-maker microcode.
+  The page's browser audio links mbedTLS, which is dual-licensed (Apache-2.0 OR GPL-2.0-or-later): this GPL build
+  takes the GPL-2.0-or-later arm, and a separately licensed build takes the Apache-2.0 arm.
 endef
 
 define Package/awvoice-phoned/conffiles
@@ -50,6 +52,9 @@ define Package/awvoice-phoned/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/files/awvoice.init $(1)/etc/init.d/awvoice
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/files/awvoice.config $(1)/etc/config/awvoice
 	$(INSTALL_DATA) files/board.bin $(1)/usr/share/awvoice/board-default.bin
+	# the greeting the answering machine plays when the router has none of its own: an asset of this project's,
+	# copied into place by the init script only when nothing is there yet (never written over by an upgrade)
+	$(INSTALL_DATA) files/greeting-default.wav $(1)/usr/share/awvoice/greeting-default.wav
 	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
 	# /etc is NOT kept by sysupgrade: only /etc/config/ and base-files' essential
 	# list are, so a flash would drop the board file, the greeting, the call log,

@@ -15,7 +15,7 @@
 
 /*
  * The two folders the daemon keeps files in — the call recordings and the answering machine's messages — under one
- * set of rules: which names are ours, how a folder is made and proven, how much room it has left, and which of its
+ * set of rules: which names this program owns, how a folder is made and proven, how much room it has left, and which of its
  * files the budget takes. The files are called <epoch>-<call id>.wav, both parts decimal: no caller's number ever
  * enters a name, and the daemon never touches a file it did not write, because the two folders can be pointed at a
  * shared USB mount that holds anything else.
@@ -62,7 +62,7 @@ static inline void storage_num_add(unsigned long long *v, unsigned int digit)
 		*v = *v * 10 + digit;
 }
 
-/* the two numbers of a name; -EINVAL when it is not one of ours */
+/* the two numbers of a name; -EINVAL when it is not one this program wrote */
 static inline int storage_name_ids(const char *name, unsigned long long *epoch, unsigned long long *id)
 {
 	const char *p = name;
@@ -113,7 +113,7 @@ static inline int storage_path_norm(char *path, size_t size)
 		if (!(path[from] == '/' && path[to - 1] == '/'))
 			path[to++] = path[from];
 	path[to] = 0;
-	return to > 1 ? 0 : -EINVAL;	/* "/" is the system's, not a folder of ours */
+	return to > 1 ? 0 : -EINVAL;	/* "/" is the system's, not a folder this program uses */
 }
 
 struct storage_state {
@@ -140,7 +140,7 @@ static inline int storage_prepare(const char *dir, struct storage_state *st)
 	if (stat(dir, &sb)) {
 		err = errno;
 	} else if (!S_ISDIR(sb.st_mode)) {
-		err = ENOTDIR;		/* a file carries the folder's name: no file of ours can land beside it */
+		err = ENOTDIR;		/* a file carries the folder's name: no file of this program's can land beside it */
 	} else if (statvfs(dir, &vfs)) {
 		err = errno;
 	} else if (vfs.f_flag & ST_RDONLY) {
@@ -167,8 +167,8 @@ static inline int storage_can_write(const struct storage_state *st)
 	return st->ready && st->free_mb >= STORAGE_MIN_FREE_MB;
 }
 
-/* the daemon's own tmp files of a killed write; another program's .tmp is never ours to remove. A probe left between
- * its creation and its removal (a killed check) is litter of ours too and goes, uncounted. Returns how many tmps */
+/* the daemon's own tmp files of a killed write; another program's .tmp is never this program's to remove. A probe left between
+ * its creation and its removal (a killed check) is this program's litter too and goes, uncounted. Returns how many tmps */
 static inline unsigned int storage_tmp_clean(const char *dir)
 {
 	char path[STORAGE_PATH_MAX], base[STORAGE_NAME_MAX + 1];

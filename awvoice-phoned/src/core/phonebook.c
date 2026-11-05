@@ -36,7 +36,8 @@ static int type_ok(const char *t)
 	return !strcmp(t, "mobile") || !strcmp(t, "home") || !strcmp(t, "work");
 }
 
-int phonebook_add(struct phonebook *pb, const char *name, const char *const *numbers, unsigned int count, const char *quick, FILE *log)
+int phonebook_add(struct phonebook *pb, const char *name, const char *const *numbers, unsigned int count, const char *quick,
+	int ring_through, FILE *log)
 {
 	struct pb_contact ct;
 	unsigned int k;
@@ -57,6 +58,7 @@ int phonebook_add(struct phonebook *pb, const char *name, const char *const *num
 		ct.number[k][n] = 0;
 	}
 	ct.count = count;
+	ct.ring_through = ring_through ? 1 : 0;	/* the book keeps a word, not whoever wrote it */
 	if (quick && *quick) {
 		if (strlen(quick) != PB_QUICK_LEN || quick[0] < '0' || quick[0] > '9' || quick[1] < '0' || quick[1] > '9')
 			return refuse(log, -EINVAL, "the speed-dial code is not two digits");
@@ -84,6 +86,22 @@ int phonebook_name(const struct phonebook *pb, const char *number, char *out, si
 				return 0;
 			}
 	return -ENOENT;
+}
+
+int phonebook_ring_through(const struct phonebook *pb, const char *number)
+{
+	unsigned int k, j;
+
+	if (!number || !*number)
+		return 0;				/* a caller nobody can name is no one's contact */
+	for (k = 0; k < pb->n; k++) {
+		if (!pb->c[k].ring_through)
+			continue;
+		for (j = 0; j < pb->c[k].count; j++)
+			if (number_same(pb->c[k].number[j], number, pb->region))
+				return 1;
+	}
+	return 0;
 }
 
 int phonebook_speed(const struct phonebook *pb, const char *code, char *out, size_t cap)

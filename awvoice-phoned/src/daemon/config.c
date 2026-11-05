@@ -5,8 +5,10 @@
 
 #include "config.h"
 #include "hookwatch.h"
+#include "machine.h"		/* the greeting's one path, which is no longer a setting */
 #include "numbers.h"
 #include "phone.h"
+#include "region_follow.h"
 #include "storage.h"
 
 #define DEFAULT_BOARD		"/etc/awvoice/board.bin"
@@ -20,6 +22,10 @@
 #define DEFAULT_MACHINE_DELAY_S	10
 #define DEFAULT_RECORD_PATH	"/etc/awvoice/recordings"
 #define DEFAULT_MACHINE_PATH	"/etc/awvoice/messages"
+#define DEFAULT_WEB_PORT	7443
+#define DEFAULT_WEB_IFACE	"lan"
+#define DEFAULT_WEB_CERT	"/etc/uhttpd.crt"
+#define DEFAULT_WEB_KEY		"/etc/uhttpd.key"
 #define LED_NAME_MAX		63	/* a name of /sys/class/leds */
 #define RING_RATE_DEFAULT_MS	300	/* the fast blink: an incoming call */
 #define RING_RATE_MAX_MS	3000
@@ -40,7 +46,8 @@ void config_defaults(struct aw_config *c)
 	c->ringback = AW_RINGBACK_AUTO;
 	c->earpiece_volume = AW_CONFIG_UNSET;
 	c->modem_rx_gain = AW_CONFIG_UNSET;
-	snprintf(c->region, sizeof(c->region), "%s", number_region_default()->name);
+	/* the numbering plan follows the network the line registers on; a name in the table overrides that */
+	snprintf(c->region, sizeof(c->region), "%s", REGION_AUTO);
 	c->hotline_delay_s = DEFAULT_HOTLINE_DELAY_S;
 	c->call_waiting = 1;
 	c->ring_rate_ms = RING_RATE_DEFAULT_MS;
@@ -48,10 +55,14 @@ void config_defaults(struct aw_config *c)
 	c->record_max_mb = 50;
 	snprintf(c->record_path, sizeof(c->record_path), "%s", DEFAULT_RECORD_PATH);
 	c->machine_delay_s = DEFAULT_MACHINE_DELAY_S;
-	snprintf(c->machine_greeting, sizeof(c->machine_greeting), "%s", "/etc/awvoice/greeting.wav");
 	snprintf(c->machine_path, sizeof(c->machine_path), "%s", DEFAULT_MACHINE_PATH);
 	c->machine_max_mb = 50;
 	c->machine_max_s = 120;
+	snprintf(c->sip_mode, sizeof(c->sip_mode), "%s", "web");
+	c->web_port = DEFAULT_WEB_PORT;
+	snprintf(c->web_iface, sizeof(c->web_iface), "%s", DEFAULT_WEB_IFACE);
+	snprintf(c->web_cert, sizeof(c->web_cert), "%s", DEFAULT_WEB_CERT);
+	snprintf(c->web_key, sizeof(c->web_key), "%s", DEFAULT_WEB_KEY);
 }
 
 /* a whole decimal number in [low, high]: no sign, no space, no trailing text */
@@ -92,6 +103,20 @@ static int bad(FILE *log, const char *name)
 	if (log)
 		fprintf(log, "setting %s is not valid: the default is used\n", name);
 	return -EINVAL;
+}
+
+/* an interface name as the kernel takes one: letters, digits, '_', '-', '.', and no longer than IFNAMSIZ - 1 */
+static int iface_name_ok(const char *s)
+{
+	const char *p;
+
+	if (!*s)
+		return 0;
+	for (p = s; *p; p++)
+		if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+		      *p == '_' || *p == '-' || *p == '.'))
+			return 0;
+	return 1;
 }
 
 int config_set(struct aw_config *c, const char *name, const char *value, FILE *log)
@@ -204,7 +229,7 @@ int config_set(struct aw_config *c, const char *name, const char *value, FILE *l
 			return bad(log, name);
 		c->conference = (int)v;
 	} else if (!strcmp(name, "region")) {
-		if (!number_region_find(value))
+		if (strcmp(value, REGION_AUTO) && !number_region_find(value))
 			return bad(log, name);
 		snprintf(c->region, sizeof(c->region), "%s", value);
 	} else if (!strcmp(name, "led")) {
@@ -251,9 +276,16 @@ int config_set(struct aw_config *c, const char *name, const char *value, FILE *l
 			return bad(log, name);
 		c->machine_enabled = (int)v;
 	} else if (!strcmp(name, "machine_greeting")) {
-		if (value[0] != '/' || strlen(value) >= sizeof(c->machine_greeting))
-			return bad(log, name);
-		snprintf(c->machine_greeting, sizeof(c->machine_greeting), "%s", value);
+		/*
+		 * Retired: the greeting is the one file the page manages, at the path machine.h names, and the package puts
+		 * its default there when nothing is. A stored path is ignored rather than followed, because a file the
+		 * machine plays should not be reachable from a config line the page no longer offers - and the line in the
+		 * log says so, so nobody hunts for why their old path stopped working.
+		 */
+		if (log)
+			fprintf(log, "awvoice.main.machine_greeting is not a setting any more: the greeting is %s, recorded or uploaded on the Phone settings page\n",
+				MACHINE_GREETING_PATH);
+		return -ENOENT;		/* nothing was stored in the config this build reads */
 	} else if (!strcmp(name, "machine_delay")) {
 		if (!number_in(value, 0, 60, &v))
 			return bad(log, name);
@@ -275,10 +307,39 @@ int config_set(struct aw_config *c, const char *name, const char *value, FILE *l
 		if (!number_in(value, 10, 600, &v))
 			return bad(log, name);
 		c->machine_max_s = v;
+	} else if (!strcmp(name, "web_port")) {
+		if (!number_in(value, 1024, 65535, &v))
+			return bad(log, name);
+		c->web_port = v;
+	} else if (!strcmp(name, "web_iface")) {
+		/* an interface name, not a path or an address: the daemon asks the network for its IPv4 address */
+		if (!value[0] || strlen(value) >= sizeof(c->web_iface) || !iface_name_ok(value))
+			return bad(log, name);
+		snprintf(c->web_iface, sizeof(c->web_iface), "%s", value);
+	} else if (!strcmp(name, "web_cert")) {
+		if (value[0] != '/' || strlen(value) >= sizeof(c->web_cert))
+			return bad(log, name);
+		snprintf(c->web_cert, sizeof(c->web_cert), "%s", value);
+	} else if (!strcmp(name, "web_key")) {
+		if (value[0] != '/' || strlen(value) >= sizeof(c->web_key))
+			return bad(log, name);
+		snprintf(c->web_key, sizeof(c->web_key), "%s", value);
 	} else {
 		return -ENOENT;
 	}
 	return 0;
+}
+
+int config_set_sip(struct aw_config *c, const char *value, FILE *log)
+{
+	/* the three words this build knows: one for the line's own phones, two for a network phone beside them. Another
+	 * word is not a side it has, so the configured mode stays rather than the line going to something that is not
+	 * there; an unset option is web, the side that asks nothing of any other program */
+	if (!value || !strcmp(value, "web") || !strcmp(value, "interop") || !strcmp(value, "baresip")) {
+		snprintf(c->sip_mode, sizeof(c->sip_mode), "%s", value ? value : "web");
+		return 0;
+	}
+	return bad(log, "sip.mode");
 }
 
 void config_finish(struct aw_config *c, FILE *log)

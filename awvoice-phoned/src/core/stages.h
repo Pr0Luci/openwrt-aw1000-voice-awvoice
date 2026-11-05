@@ -74,7 +74,7 @@ struct call_ops {
  *      values loaded, the oscillators started (continuous) for the hold time, then they stop and the line opens
  *   7  dial tone with DTMF detection on top: the stage 6 chain plus the tone detector (its event watched during the
  *      hold; every detected digit is logged), the detector state restored afterwards
- *   8  the voice path: the stage 7 chain plus the chip's codec at our frame bit positions and the chip's own dialing controls
+ *   8  the voice path: the stage 7 chain plus the chip's codec at the router's frame bit positions and the chip's own dialing controls
  *      off; with a bridge-start callback (the real run supplies it, the tests pass none) the kernel bridge then moves
  *      the chip's audio to and from the modem during the hold; with call ops the hold also answers an incoming
  *      voice call when the caller lifts the handset and hangs up when it is put back. The outgoing side: the digits

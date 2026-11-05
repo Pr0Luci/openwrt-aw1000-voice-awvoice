@@ -27,6 +27,7 @@ var ICONS = {
 	trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
 	download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
 	user: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+	mic: '<rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/>',
 	ban: '<circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>',
 	book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
 	play: '<polygon points="5 3 19 12 5 21 5 3"/>',
@@ -42,6 +43,8 @@ var ICONS = {
 	check: '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
 	alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>'
 };
+
+var FIELD_SEQ = 0;
 
 return baseclass.extend({
 	icon: function(name, cls) {
@@ -82,16 +85,16 @@ return baseclass.extend({
 		return E('span', { 'class': 'av-tag' }, text);
 	},
 
-	/* Icon + label button built on the native LuCI button classes. */
+	/* Button built on the native LuCI button classes; the theme draws it, the page only chooses the class. */
 	button: function(label, icon, cls, handler, attrs) {
-		var a = Object.assign({ 'class': 'cbi-button av-btn ' + (cls || ''), 'type': 'button', 'click': handler }, attrs || {});
+		var a = Object.assign({ 'class': 'cbi-button ' + (cls || ''), 'type': 'button', 'click': handler }, attrs || {});
 		return E('button', a, [ icon ? this.icon(icon) : '', label ? E('span', label) : '' ]);
 	},
 
 	/* Icon-only button; the label is for screen readers and the tooltip. */
 	iconButton: function(label, icon, handler, cls) {
 		return E('button', {
-			'class': 'cbi-button av-btn ' + (cls || ''), 'type': 'button',
+			'class': 'cbi-button ' + (cls || ''), 'type': 'button',
 			'aria-label': label, 'title': label, 'click': handler
 		}, this.icon(icon));
 	},
@@ -116,7 +119,7 @@ return baseclass.extend({
 
 	/* The banner of a part whose backend is not built yet (data contract: "not available yet"). */
 	notYet: function(what) {
-		return E('div', { 'class': 'av-ban w', 'role': 'status' }, [
+		return E('div', { 'class': 'av-ban alert-message warning', 'role': 'status' }, [
 			this.icon('info'),
 			E('div', [ E('b', _('Not available yet')), what ? E('div', { 'class': 'av-sub' }, what) : '' ])
 		]);
@@ -136,6 +139,43 @@ return baseclass.extend({
 		var node = E('label', { 'class': 'av-inline' }, [ input, label ? E('span', label) : '' ]);
 		return {
 			node: node, input: input,
+			get: function() { return input.checked; },
+			set: function(v) { input.checked = !!v; }
+		};
+	},
+
+	/* A form field for a grid: the label above the control, the help under it. The label points at the control, so
+	 * clicking the name focuses the field. */
+	gridField: function(title, control, help) {
+		var lab = E('label', { 'class': 'av-ffld-t' }, title);
+		var tag = control && control.tagName ? control.tagName.toLowerCase() : '';
+
+		if (tag == 'input' || tag == 'select' || tag == 'textarea') {
+			var id = control.id || ('av-f' + (++FIELD_SEQ));
+
+			control.id = id;
+			lab.setAttribute('for', id);
+		}
+		return E('div', { 'class': 'av-ffld' }, [
+			lab,
+			E('div', { 'class': 'av-ffld-c' }, control),
+			help ? E('div', { 'class': 'av-ffld-h' }, help) : ''
+		]);
+	},
+
+	/* A toggle for a card's summary row: the theme's own switch, with the name for screen readers only. The theme
+	 * draws the switch only when the checkbox sits in its own container, so the page gives it that container, the
+	 * place in the row and the name, and nothing else. */
+	toggle: function(value, label, onchange) {
+		var input = E('input', { 'type': 'checkbox' });
+
+		input.checked = !!value;
+		input.setAttribute('aria-label', label);
+		if (onchange)
+			input.addEventListener('change', function() { onchange(input.checked); });
+		return {
+			node: E('div', { 'class': 'cbi-checkbox av-sw' }, [ input ]),
+			input: input,
 			get: function() { return input.checked; },
 			set: function(v) { input.checked = !!v; }
 		};

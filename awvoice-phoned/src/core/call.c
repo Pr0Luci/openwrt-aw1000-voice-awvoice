@@ -11,6 +11,7 @@
 
 #include "call.h"
 #include "cid.h"
+#include "dnd.h"
 #include "alarm.h"
 #include "blocking.h"
 #include "forward.h"
@@ -22,6 +23,10 @@
 #include "ring.h"
 #include "slic_map.h"
 #include "stages.h"
+
+#define HD_ASK_MAX	2	/* how many times the modem is asked to change its PCM rate for one wish: each ask
+				   restarts the modem and drops the mobile data, so a modem that answers the other rate
+				   twice is not asked again until the setting changes or the service starts */
 
 /*
  * The line state of a handset held on a fed line (stages 6..8). The hook engine tells what the handset does; this
@@ -40,6 +45,7 @@ enum line_state {
 /* the record and the policy of the waiting call (a second incoming call during a call): one at a time */
 struct wait_call {
 	enum phone_dir dir;		/* of the call the record is about */
+	enum phone_answered_by answered_by;	/* the door that took it, when a flash did (the handset's or the page's) */
 	int open;			/* a waiting call is being followed */
 	unsigned int id, tries;
 	char number[PHONE_NUMBER_MAX + 1];
@@ -58,6 +64,7 @@ struct phone {
 	enum line_state state;
 	struct hookwatch hw;		/* the hook engine: break durations on the monotonic clock */
 	uint8_t lcr;			/* the last hook register value read */
+	uint8_t ring_lcr;		/* its ring bits (trip, loop) as last read while the ring runs */
 	const struct call_ops *call;	/* optional modem answering; 0 = the hold knows nothing of calls */
 	const struct board *board;	/* the board file (the FSK words) */
 	/* a call */
@@ -65,13 +72,31 @@ struct phone {
 	int offered;			/* the incoming call arrived while the handset was down: it rings, and a lift answers it */
 	int refused;		/* the incoming call arrived while the handset was up, or is blocked: the caller is released and the phone does not ring */
 	int blocked;		/* ... because the blocking rules say so (it is never offered, not even when the handset goes down) */
+	int quieted;		/* quiet hours cover this caller: the call is offered, but the handset is not driven */
+	int quiet_mode;		/* the window's own mode, kept for the answering machine and for the page's word */
+	int quiet_said;		/* this call's silence has been said once: the verdict is worked out again every step */
+	char quiet_peer[PHONE_NUMBER_MAX + 1];	/* the last caller quiet hours covered, for the repeat escape (it outlives the call) */
+	uint64_t quiet_epoch;	/* its time in whole seconds, from the daemon's clock; 0 = nothing remembered */
+	/* this call's own silence, held apart until it ends: the escape may only look at calls that went, or a caller
+	 * answers its own ring. The number is staged here rather than read back at the end because the call list
+	 * clearing (3GPP TS 27.007 7.18) wipes p->peer before the incoming call is closed. */
+	char quiet_stage_peer[PHONE_NUMBER_MAX + 1];
+	uint64_t quiet_stage_epoch;	/* 0 = this call was not silenced (or its number was never known) */
 	int machine_answering;		/* the answering machine's answer went out: the ring is off and the call is not offered to the handset */
 	int machine_ata_ok;		/* the modem accepted that answer: the call list is only catching up, so no retry and no ring */
 	int machine_call;		/* the call in progress was answered by the machine: the handset is down and hears nothing */
 	int machine_failed;		/* the modem refused every answer of this call: the phone rings on, the machine does not ask again */
+	int fe_answering;		/* a front-end's answer went out: the call list has not shown the call active yet */
+	int fe_ata_ok;			/* the modem accepted that answer */
+	int fe_failed;			/* every answer of this call was refused: the phone rings on */
+	int fe_dial;			/* the outgoing call was dialled by a front-end: the handset is not in it */
+	int fe_call;			/* the call in progress is the front-end's: nobody at the handset hears it */
+	enum phone_answered_by fe_via;		/* the door the front end's answer came in by: the page's own, or the installed service's */
+	enum phone_answered_by answered_by;	/* who answered the current call */
 	unsigned int tries;		/* answers (or refusals) sent for this incoming call */
 	unsigned long long tried_ms;	/* when the last one was sent */
 	int ending;			/* the hang-up was sent: the call list may still show the call for a poll or two */
+	int gone_polls;			/* a live call was absent from one list: one more poll confirms its release */
 	int alerting;			/* the network reported the remote ringing (the ringing tone starts then) */
 	int setup_said;			/* "the network is setting the call up" was logged for this attempt (once) */
 	int cause;			/* the network's release cause of the released call (TS 24.008) */
@@ -106,15 +131,20 @@ struct phone {
 	/* what the modem said to the idle questions (modemq.h); MQ_UNKNOWN / "" until it did */
 	unsigned int info_next;		/* the question to ask next */
 	unsigned long long info_due_ms;
-	int sim_ready, registered, ims, rsrp_dbm, audio_slave, clir, clir_status;
+	int sim_ready, registered, ims, rsrp_dbm, audio_slave, audio_rate, clir, clir_status;
 	enum { RING_FOR_CALL, RING_FOR_ALARM } ring_for;	/* what the ring that is being started is for: an alarm sends no caller id */
 	unsigned long long alarm_next_ms;	/* the next check of the alarm clock */
 	/* call forwarding at the network: erase, register, read back (forward.h) */
 	enum { FWD_STAGE_IDLE, FWD_STAGE_ERASING, FWD_STAGE_REGISTERING, FWD_STAGE_QUERY_DUE, FWD_STAGE_QUERYING } fwd_stage;
 	int fwd_want;			/* the settings changed (or are new): the exchange starts when the line is idle */
 	/* the HD voice change: the chip's wideband mode is applied at once, then the modem's PCM rate and its restart */
-	enum { HD_IDLE, HD_QDAI_WRITE, HD_CFUN } hd_stage;
+	enum { HD_IDLE, HD_QDAI_WRITE, HD_READBACK } hd_stage;
 	int hd_want;			/* the HD setting changed: the modem exchange starts when the line is idle */
+	int hd_inforce;			/* the layout this line was brought up with: 0 = 8 kHz, 1 = 16 kHz (the chip, the PCM slots and the bridge agree on it) */
+	int hd_layout_due;		/* the modem has answered with the wanted rate: the daemon owes the line a bring-up at it */
+	int hd_gave_up;			/* the modem was asked and answered something else: said once, asked again by the next settings change */
+	int hd_waiting;			/* the "the rate has not been read yet" line has been said for this wish */
+	unsigned int hd_asks;		/* rate writes sent for this wish: a modem that keeps answering the other rate is not pestered */
 	char qdai_head[8];		/* the AT+QDAI? first field as the modem prints it (a digit or the literal "x"), written back verbatim */
 	struct phone_forward fwd_job;	/* the settings the running exchange sets */
 	struct phone_forward_state fwd_net;
@@ -141,6 +171,7 @@ struct phone {
 	int wait_promoted;		/* the call that is incoming now was the waiting call: it is offered even with the handset up */
 	int flash_open;			/* a flash was made in a call: the next key within FLASH_CODE_MS is a code */
 	unsigned long long flash_until_ms;
+	enum phone_answered_by flash_via;	/* the door of that flash: the handset's key or the page */
 	int ccwa_stage;			/* the read-back of the network's call waiting: 0 none, 1 due, 2 asked */
 	int ccwa_net;
 	unsigned int leg_primary;	/* the line call id that was given to a leg */
@@ -154,6 +185,10 @@ struct phone {
 	unsigned int net_run;		/* windows in a row above NET_AUDIO_PEAK in this call's set-up */
 	int net_tone;			/* the network's own audio is heard in this call: the local ringing tone is off for good */
 	char network[MQ_NETWORK_MAX], band[MQ_NETWORK_MAX];
+	char mcc[MQ_MCC_MAX];		/* the three digits of the registered network (E.212), "" until +COPS? names one */
+	int mcc_warned;			/* the modem named its network in text instead of digits: said once per registration */
+	int mcc_named;			/* a reply carried a name where the digits were asked for */
+	char netname[MQ_NETWORK_MAX];	/* the name the modem gives for its network, where it gives a name at all (the page and the log show it) */
 	/* the watch's own timing record: the hook must be read every few ms whatever else the loop does */
 	unsigned long long hook_at_ms;	/* the clock time of the last hook read */
 	unsigned long long slow_ms;	/* the slowest task since the last hook read ... */
@@ -195,6 +230,7 @@ struct phone {
 };
 
 static void legs_text(const struct phone *p, char *out, size_t cap);
+static int service_ok(const struct phone *p);
 
 /* what the line shows the API: the ringing phone is its own state, the rest follow the line state */
 static enum phone_line phone_line_of(const struct phone *p)
@@ -205,7 +241,14 @@ static enum phone_line phone_line_of(const struct phone *p)
 		[LINE_NO_SERVICE] = PHONE_LINE_NO_SERVICE,
 	};
 
-	return p->ringing ? PHONE_LINE_RINGING : shown[p->state];
+	/* an answer still on its way is not an idle line: the ring has stopped, but the call is neither active nor
+	 * gone (3GPP TS 27.007 lists a call the network still offers as incoming); saying idle here published a
+	 * release to a front end that then hung the call up */
+	/* a quieted call is not an idle line either: the network still offers it, a lifted handset answers it, and
+	 * saying idle would publish a release to every front end */
+	if (p->ringing || p->quieted || p->machine_answering || p->fe_answering)
+		return PHONE_LINE_RINGING;
+	return shown[p->state];
 }
 
 /* what the answering machine is doing with the current call */
@@ -221,7 +264,8 @@ static int machine_state(const struct phone *p)
 static void emit(struct phone *p, enum phone_event_kind kind, unsigned long long now)
 {
 	struct phone_event ev = { .kind = kind, .line = phone_line_of(p), .call_id = p->call_id, .dir = p->dir,
-		.call = (enum call_state)p->call_seen, .machine = machine_state(p), .at_ms = now };
+		.call = (enum call_state)p->call_seen, .machine = machine_state(p), .answered_by = p->answered_by,
+		.quiet = p->quieted, .at_ms = now };
 
 	if (p->hooks.event)
 		p->hooks.event(p->hooks.ctx, &ev);
@@ -231,7 +275,19 @@ static void emit(struct phone *p, enum phone_event_kind kind, unsigned long long
 static void emit_machine(struct phone *p, int why, unsigned long long now)
 {
 	struct phone_event ev = { .kind = PHONE_EV_MACHINE, .line = phone_line_of(p), .call_id = p->call_id, .dir = p->dir,
-		.call = (enum call_state)p->call_seen, .machine = why, .at_ms = now };
+		.call = (enum call_state)p->call_seen, .machine = why, .answered_by = p->answered_by,
+		.quiet = p->quieted, .at_ms = now };
+
+	if (p->hooks.event)
+		p->hooks.event(p->hooks.ctx, &ev);
+}
+
+/* the quiet-hours code the handset dialled: what it asked for, for the daemon to keep */
+static void emit_dnd(struct phone *p, int manual, unsigned long long now)
+{
+	struct phone_event ev = { .kind = PHONE_EV_DND, .line = phone_line_of(p), .call_id = p->call_id, .dir = p->dir,
+		.call = (enum call_state)p->call_seen, .machine = machine_state(p), .answered_by = p->answered_by,
+		.manual = manual, .quiet = p->quieted, .at_ms = now };
 
 	if (p->hooks.event)
 		p->hooks.event(p->hooks.ctx, &ev);
@@ -267,6 +323,7 @@ static int ring_stop(struct chip *c, unsigned int ch, struct phone *p, const cha
 
 	p->ringing = 0;
 	p->ring_end_ms = 0;
+	p->ring_lcr = 0;
 	p->cid_wait_ms = 0;		/* a stop during a pre-ring caller id's gap: no delayed ring start */
 	report_line(p, p->step_ms);
 	fprintf(log, "  channel %u: ring stopped (%s)\n", ch, why);
@@ -281,22 +338,30 @@ static int ring_start(struct chip *c, unsigned int ch, struct phone *p, unsigned
 	int err;
 
 	/* the European placement (the FSK message before the first burst): the identity goes out first, the ring
-	 * voltage starts CID_PRERING_GAP_MS later so the message is not clipped; a lift during the send answers */
+	 * voltage starts CID_PRERING_GAP_MS after the message so the message is not clipped; a lift during the send answers */
 	if (p->cfg.cid_prering && p->ring_for == RING_FOR_CALL && p->call && p->call->cid >= CID_BELLCORE
 	    && p->call->cid <= CID_ETSI && p->call->number) {
 		char number[PHONE_NUMBER_MAX + 1];
 
 		if (!p->call->number(p->call->ctx, number, sizeof(number)) && number[0]) {
+			unsigned long long sent_at;
+
 			cid_deliver(c, p, ch, number, log);
+			/* the silence is owed after the message's last byte, not after the moment its send began: the
+			 * seizure, the mark and the bytes at 1200 baud take longer than CID_PRERING_GAP_MS, so the step's
+			 * own time is already past its deadline when the send returns */
+			sent_at = clock_ms(c);
 			p->ringing = 1;
 			report_line(p, now);
 			p->ring_since_ms = p->ring_log_ms = now;
 			p->burst_seen = 0;
 			p->gap_since_ms = 0;
 			p->last_lf = 0xff;
+			p->ring_lcr = p->lcr & (LCR_RTP | LCR_ON_HOOK);
 			p->cid_pending = 0;
-			p->cid_wait_ms = now + CID_PRERING_GAP_MS;
-			stamped(log, "  channel %u: the caller id goes out before the first ring; the ring starts %u ms later\n", ch, (unsigned)CID_PRERING_GAP_MS);
+			p->cid_wait_ms = sent_at + CID_PRERING_GAP_MS;
+			stamped(log, "  channel %u: the caller id goes out before the first ring; the ring starts %u ms after the message\n", ch,
+				(unsigned)CID_PRERING_GAP_MS);
 			return 0;
 		}
 	}
@@ -309,6 +374,7 @@ static int ring_start(struct chip *c, unsigned int ch, struct phone *p, unsigned
 		p->burst_seen = 0;
 		p->gap_since_ms = 0;
 		p->last_lf = 0xff;
+		p->ring_lcr = p->lcr & (LCR_RTP | LCR_ON_HOOK);
 		p->cid_pending = p->ring_for == RING_FOR_CALL && p->call && p->call->cid && p->call->number;
 		p->cid_number[0] = 0;
 		if (p->cid_pending && p->call->number(p->call->ctx, p->cid_number, sizeof(p->cid_number)))
@@ -457,6 +523,14 @@ static int ring_tick(struct chip *c, unsigned int ch, struct phone *p, unsigned 
 		} else if (p->burst_seen && !p->gap_since_ms) {
 			p->gap_since_ms = now;
 		}
+		/* the chip's own ring trip with the loop still open: it left the ringing state on the ring current the
+		 * line's load draws, not on a lifted handset. No further burst follows, so the ring is stopped and the
+		 * cause is said; the call stays offered and a lift still answers it. */
+		if (!p->cid_wait_ms && (lf & LF_STATE_MASK) != LF_CODE_RING
+		    && (p->ring_lcr & LCR_RTP) && !(p->ring_lcr & LCR_ON_HOOK)) {
+			stamped(log, "  channel %u: the chip's ring trip fired before any lift (hook register 0x%02x)\n", ch, p->ring_lcr);
+			return ring_stop(c, ch, p, "the chip tripped the ring before any lift", log);
+		}
 	}
 	if (p->cid_pending) {
 		/* the silence after the first burst (or, if the register never shows a burst, the cadence's own timing) */
@@ -468,7 +542,10 @@ static int ring_tick(struct chip *c, unsigned int ch, struct phone *p, unsigned 
 				p->burst_seen ? "" : " (no burst seen, the cadence's own timing)");
 			/* a failed send is logged by cid_send; the ring goes on either way */
 			(void)cid_deliver(c, p, ch, p->cid_number, log);
-			if (p->ringing && ring_hold(c, ch, p, now, log))
+			/* what is left of the pause is counted from the message's last byte: the step's own time was
+			 * taken before a send of some hundreds of milliseconds, and a deadline out of it promises back the
+			 * silence the message already used up */
+			if (p->ringing && ring_hold(c, ch, p, clock_ms(c), log))
 				return -EIO;
 		}
 	}
@@ -520,7 +597,7 @@ static void modem_cmd(struct phone *p, const char *cmd, unsigned int ch, FILE *l
 }
 
 /*
- * The modem setup, at every modem open (the daemon's start, a port that came back): no echo of our own commands, numeric error
+ * The modem setup, at every modem open (the daemon's start, a port that came back): no echo of the commands sent here, numeric error
  * codes, the caller's number with the ring and the extended ring report (3GPP TS 27.007: +CLIP, +CRC, +CMEE), then the two audio levels
  * but only the ones that are set. The earpiece level (+CLVL) is written once the modem has said which range it accepts
  * (the test command), the receive gain (+QRXGAIN) as it is. The PCM mode is only read (AT+QDAI?), never written.
@@ -529,7 +606,7 @@ static void modem_setup(struct phone *p, unsigned long long now)
 {
 	char cmd[MODEM_CMD_MAX];
 
-	p->audio_slave = MQ_UNKNOWN;
+	p->audio_slave = p->audio_rate = MQ_UNKNOWN;
 	p->audio_warned = 0;
 	p->info_next = 0;				/* the audio mode is the first question */
 	p->info_due_ms = now + INFO_EVERY_MS / 4;
@@ -540,6 +617,8 @@ static void modem_setup(struct phone *p, unsigned long long now)
 	modem_cmd(p, "AT+CMEE=1", p->ch, p->log);
 	modem_cmd(p, "AT+CLIP=1", p->ch, p->log);
 	modem_cmd(p, "AT+CRC=1", p->ch, p->log);
+	/* the operator is read as digits, so its mobile country code can be read out of it (TS 27.007 +COPS format 0) */
+	modem_cmd(p, "AT+COPS=3,0", p->ch, p->log);
 	if (p->cfg.rx_gain_set) {
 		snprintf(cmd, sizeof(cmd), "AT+QRXGAIN=%d", p->cfg.modem_rx_gain);
 		modem_cmd(p, cmd, p->ch, p->log);
@@ -592,6 +671,8 @@ static void call_begin(struct phone *p, enum phone_dir dir, unsigned long long n
 	p->dir = dir;
 	p->call_since_ms = now;
 	p->answered_ms = 0;
+	p->answered_by = PHONE_ANSWERED_NONE;
+	p->fe_via = PHONE_ANSWERED_WEB;
 }
 
 static void release_tone_start(struct phone *p, unsigned long long now)
@@ -619,16 +700,36 @@ static void record_close(struct phone *p, unsigned long long now)
 	rec.end_ms = p->rec_gone_ms ? p->rec_gone_ms : now;
 	rec.cause = p->rec_cause;
 	rec.result = phone_result_of(p->dir, p->answered_ms != 0, p->rec_refused, p->rec_blocked, rec.cause);
+	rec.answered_by = p->answered_by;
 	p->hooks.call_ended(p->hooks.ctx, &rec);
 }
 
 /* the incoming call is over (not listed, or gone): nothing about it is kept */
 static void call_over(struct phone *p)
 {
+	/* the caller quiet hours covered on this call is remembered now, and only now: while a call is listed the
+	 * escape must not find that same call, or a caller answers its own ring. The number comes from the stage, not
+	 * from p->peer - the caller id can arrive after the call was first listed, and the list clearing wipes p->peer
+	 * before the call is closed */
+	if (p->quiet_stage_epoch) {
+		snprintf(p->quiet_peer, sizeof(p->quiet_peer), "%s", p->quiet_stage_peer);
+		p->quiet_epoch = p->quiet_stage_epoch;
+		p->quiet_stage_peer[0] = 0;
+		p->quiet_stage_epoch = 0;
+	}
 	p->incoming = p->offered = p->refused = p->blocked = p->wait_promoted = p->recall = 0;
+	p->quieted = 0;			/* the quiet caller and its time stay: the escape outlives the call */
+	p->quiet_said = 0;		/* the next call is a new one to speak about */
+	p->quiet_mode = DND_MODE_SILENT;
 	p->recall_active = p->released_one = 0;
 	p->tries = 0;
 	p->machine_failed = 0;
+	/* the per-call front-end flags go with the call; fe_call does not, because it belongs to the call in
+	 * progress and is cleared only where that call genuinely ends */
+	p->fe_answering = 0;
+	p->fe_ata_ok = 0;
+	p->fe_failed = 0;
+	p->fe_dial = 0;
 }
 
 /* the answering machine's flags off; true when the call was the machine's (the front end then finishes its message).
@@ -663,7 +764,7 @@ static void answer_incoming(struct phone *p, unsigned int ch, FILE *log)
 
 /*
  * What an incoming call finds. This is the one place that decides it (the add-on's routing, blocking and call waiting
- * of the later milestones attach here):
+ * attach here):
  *   handset down  -> offered: the phone rings, and the lift answers it (ring trip);
  *   handset up    -> the line is in use: the caller is released as busy and the phone does not ring. A line that is off-hook
  *                    is busy for a caller (the exchange does the same: ITU-T Q.31 / E.182 busy; 3GPP TS 22.030 user
@@ -673,6 +774,54 @@ static void answer_incoming(struct phone *p, unsigned int ch, FILE *log)
  * Never answered by itself: a handset that was already up when the call came does not answer it. The answering
  * machine is the one deliberate exception, and only for an offered call with the handset down (on_call_state).
  */
+/*
+ * Quiet hours, judged every step while the network lists the call. It is judged again rather than once because the
+ * caller's identity arrives with the caller id, after the call is first listed: a call whose number was not known
+ * yet is quieted, and the step that learns the number rings it if that caller is an emergency number, is on the
+ * always-ring list, or is the same caller trying again inside the escape. The escape looks only at calls that have
+ * gone, so a caller never answers its own repeat: this call's own silence is staged, and call_over commits it when
+ * the call ends. A window that asked for a refusal releases the caller through the same path the blocking rules
+ * use. Nothing here drives or stops the handset: the caller of the ring below reads the verdict this leaves behind.
+ */
+static void quiet_judge(struct phone *p, unsigned int ch, FILE *log)
+{
+	struct dnd_now now;
+	int mode = DND_MODE_SILENT, reason = DND_R_NOT_QUIET;
+
+	p->quieted = 0;
+	p->quiet_mode = DND_MODE_SILENT;
+	if (!p->cfg.dnd)
+		return;
+	now = p->cfg.dnd->now;
+	/* the caller of the call that went last, if this is that same caller. An empty number never matches the
+	 * other (number_same, pinned in tests/test_numbers.c), so a withheld caller leaves nothing to answer, and
+	 * dnd_repeat_due reads 0 as nothing remembered */
+	now.last_peer_epoch = number_same(p->quiet_peer, p->peer, p->cfg.dnd->region) ? p->quiet_epoch : 0;
+	if (dnd_quiet(p->cfg.dnd, p->peer, &now, &mode, &reason)) {
+		p->quieted = 1;
+		p->quiet_mode = mode;
+		/* hold this call's silence until it ends. A withheld caller is staged as an empty number, and an
+		 * unknown clock stages 0, which is the value that means nothing remembered */
+		snprintf(p->quiet_stage_peer, sizeof(p->quiet_stage_peer), "%s", p->peer);
+		p->quiet_stage_epoch = now.epoch_s;
+		if (mode == DND_MODE_REJECT) {
+			p->refused = p->rec_refused = 1;
+			stamped(log, "  channel %u: an incoming call was refused: the line is quiet\n", ch);
+			return;
+		}
+		/* the plain silence is the only quiet that leaves no sound and no answer behind, so it leaves a line: said once
+		 * per call, because the same verdict is worked out again every step while the network lists it. A refusal and
+		 * the machine's answer each say themselves what became of the call. */
+		if (mode == DND_MODE_SILENT && !p->quiet_said) {
+			p->quiet_said = 1;
+			stamped(log, "  channel %u: quiet hours hold the phone off the incoming call\n", ch);
+		}
+	} else {
+		p->quiet_stage_peer[0] = 0;
+		p->quiet_stage_epoch = 0;
+	}
+}
+
 static void incoming_policy(struct phone *p, int hook_off, FILE *log, unsigned int ch)
 {
 	if (p->wait_promoted) {
@@ -680,7 +829,7 @@ static void incoming_policy(struct phone *p, int hook_off, FILE *log, unsigned i
 		p->offered = 1;
 		return;
 	}
-	/* blocking first (the page's U19..U21): the caller is released as soon as the list shows the call, before any ring; an emergency number is exempt
+	/* blocking first: the caller is released as soon as the list shows the call, before any ring; an emergency number is exempt
 	 * inside blocking_incoming. The number is not in the log. The way the network shows a withheld number is TO-VERIFY on the line. */
 	if (p->cfg.block && blocking_incoming(p->cfg.block, p->peer)) {
 		p->refused = p->blocked = p->rec_blocked = 1;
@@ -699,7 +848,7 @@ static void incoming_policy(struct phone *p, int hook_off, FILE *log, unsigned i
 /*
  * The legs of the call list: every listed voice call keeps its own call id from the moment it is first seen to the moment it leaves the list.
  * The first leg has the id of the line's call (the one the events and the call log speak about); another leg gets the next id. Only the table
- * is kept here; what a second leg means for the line is the call waiting and hold code (DESIGN.md, call waiting).
+ * is kept here; what a second leg means for the line is the call waiting and hold code below.
  */
 static void legs_update(struct phone *p)
 {
@@ -753,6 +902,7 @@ static void wait_record_close(struct phone *p, unsigned long long now)
 	snprintf(rec.number, sizeof(rec.number), "%s", w->number);
 	rec.start_ms = w->start_ms;
 	rec.answered_ms = w->answered_ms;
+	rec.answered_by = w->answered_by;
 	rec.end_ms = now;
 	rec.result = phone_result_of(w->dir, w->answered_ms != 0, w->refused, w->blocked, 0);
 	p->hooks.call_ended(p->hooks.ctx, &rec);
@@ -769,6 +919,7 @@ static void wait_promote(struct phone *p, unsigned long long now, int stat)
 	p->dir = w->dir;
 	snprintf(p->peer, sizeof(p->peer), "%s", w->number);
 	p->answered_ms = w->answered_ms;
+	p->answered_by = w->answered_by;
 	p->call_since_ms = now;
 	p->rec_open = 1;
 	p->rec_refused = p->rec_blocked = 0;
@@ -781,7 +932,7 @@ static void wait_promote(struct phone *p, unsigned long long now, int stat)
 }
 
 /*
- * The waiting call (DESIGN.md, call waiting): a second incoming call while a call is going on, listed with stat 5. It is offered (the waiting tone,
+ * The waiting call: a second incoming call while a call is going on, listed with stat 5. It is offered (the waiting tone,
  * the flash keys) unless call waiting is off or the blocking rules refuse it; a refused one is released with AT+CHLD=0 (AT+CHUP would end the active
  * call too). It has its own call id and call log record.
  */
@@ -801,8 +952,10 @@ static void waiting_update(struct phone *p, unsigned long long now)
 	}
 	if (w->open && listed < 0)
 		wait_record_close(p, now);			/* the caller gave up, or the call was released */
-	if (w->open && p->leg[listed].stat == LEG_ACTIVE && !w->answered_ms)
+	if (w->open && p->leg[listed].stat == LEG_ACTIVE && !w->answered_ms) {
 		w->answered_ms = now;
+		w->answered_by = p->flash_via;	/* a flash took it: the wait record says which door */
+	}
 	p->primary_listed = primary;
 	if (primary && p->state == LINE_SETUP)
 		p->out_listed = 1;			/* the dialled call has been listed: a list without it later means it did not come through */
@@ -868,11 +1021,12 @@ static int wait_listed_waiting(const struct phone *p)
 	return 0;
 }
 
-/* the waiting tone: a short burst now and then on the tone oscillators, over the voice path (cadence and the oscillator's effect on speech are TO-VERIFY) */
+/* the waiting tone: a short burst now and then on the tone oscillators, over the voice path, and only to a person
+ * at the handset (a front-end call has nobody there to hear it); cadence and the oscillator's effect on speech are TO-VERIFY */
 static void waiting_tone(struct phone *p, unsigned long long now)
 {
 	const struct wait_call *w = &p->wait;
-	const int live = w->open && !w->refused && !w->answered_ms && p->state == LINE_CALL && wait_listed_waiting(p);
+	const int live = w->open && !w->refused && !w->answered_ms && p->state == LINE_CALL && wait_listed_waiting(p) && p->hw.off_hook;
 	const int want = live && elapsed_ms(now, w->start_ms) % WAIT_TONE_PERIOD_MS < WAIT_TONE_ON_MS;
 
 	if (want == p->wait_tone_on || now < p->tone_retry_ms)
@@ -903,7 +1057,7 @@ static unsigned int legs_with(const struct phone *p, int stat)
 }
 
 /*
- * What a flash can do now (DESIGN.md, call waiting): take the waiting call, put the one call on hold (and get the dial tone for a second call),
+ * What a flash can do now: take the waiting call, put the one call on hold (and get the dial tone for a second call),
  * swap the active and the held call, or take the held call back when nothing is active. It needs the call list's legs.
  */
 enum flash_use { FLASH_NOTHING, FLASH_TAKE_WAITING, FLASH_HOLD, FLASH_SWAP, FLASH_RESUME };
@@ -920,7 +1074,7 @@ static enum flash_use flash_use(const struct phone *p)
 		return FLASH_SWAP;
 	if (p->state == LINE_CALL && active == 1 && p->nlegs == 1)
 		return FLASH_HOLD;
-	if (p->state == LINE_DIAL_TONE && held >= 1 && !active)
+	if (phone_flash_resume_ok(phone_line_of(p)) && held >= 1 && !active)
 		return FLASH_RESUME;
 	return FLASH_NOTHING;
 }
@@ -995,6 +1149,7 @@ static void stash_line_call(struct phone *p)
 	snprintf(w->number, sizeof(w->number), "%s", p->peer);
 	w->start_ms = p->rec_start_ms;
 	w->answered_ms = p->answered_ms;
+	w->answered_by = p->answered_by;	/* the door that answered it goes with the record */
 	p->rec_open = 0;
 	p->call_id = 0;
 	p->dir = PHONE_DIR_NONE;
@@ -1010,6 +1165,18 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 {
 	int hook_off = p->hw.off_hook, err = 0;
 
+	/* AT+CLCC is a snapshot (3GPP TS 27.007 7.18), not an event: right after ATA a modem can list no call for
+	 * one poll and the answered call on the next. A live call that disappears is therefore asked about again at
+	 * once, once, before the release is taken -- the same rule for every way a call can end. */
+	if (st == CALL_GONE || st == CALL_NONE) {
+		if (p->call_seen != CALL_NONE && p->call_seen != CALL_GONE && !p->gone_polls) {
+			p->gone_polls = 1;
+			p->poll_due_ms = p->step_ms;
+			return err;
+		}
+	} else {
+		p->gone_polls = 0;
+	}
 	if (st == CALL_INCOMING && p->state == LINE_CALL)
 		st = CALL_GONE;				/* the call in progress ended and another one is presented: the release tone first */
 	if (st == CALL_HELD && p->state == LINE_CALL) {
@@ -1088,6 +1255,11 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 			stamped(log, "  channel %u: call answered on %s %s, signal %s, ims %s\n", ch, p->network[0] ? p->network : "unknown network", p->band, level,
 				p->ims == 1 ? "registered" : p->ims == 0 ? "not registered" : "unknown");
 		}
+		/* a call that has just appeared is judged for quiet hours before it is announced: the announcement is the
+		 * event a front end rings its own phones on, and a verdict worked out later in the same step reaches it too
+		 * late to hold them back. The branch below judges the call again once the caller is known. */
+		if (st == CALL_INCOMING && !p->incoming)
+			quiet_judge(p, ch, log);
 		emit(p, PHONE_EV_CALL, now);
 		if (st == CALL_NONE) {
 			p->call_id = 0;
@@ -1097,11 +1269,26 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 		}
 	}
 	if (st == CALL_NONE || st == CALL_GONE)
-		p->ending = 0;		/* the call list has caught up with our hang-up */
+		p->ending = 0;		/* the call list has caught up with the hang-up sent here */
 	if (p->ringing && !p->ring_end_ms && st != CALL_INCOMING && !(p->recall && st != CALL_NONE && st != CALL_GONE))
 		(void)ring_stop(c, ch, p, "the call is no longer incoming", log);
-	if (st == CALL_ACTIVE && p->state != LINE_CALL && p->hw.cleared && !p->hw.off_hook && !p->ending
-	    && !p->machine_answering
+	if (st == CALL_ACTIVE && p->state != LINE_CALL && !p->ending && !p->hw.off_hook
+	    && (p->fe_answering || p->fe_dial)) {
+		/* the front end's answer or dial reached the call list: the line is in a call nobody at the handset
+		 * hears. The ring is already off and the audio is the front end's */
+		const int was_in = p->dir == PHONE_DIR_IN;
+
+		p->fe_answering = 0;
+		p->fe_dial = 0;
+		p->fe_call = 1;
+		p->answered_by = p->fe_via;
+		set_line(p, LINE_CALL, now);
+		if (was_in)
+			p->calls_in++;
+		call_over(p);
+		stamped(log, "  channel %u: the front end has the call\n", ch);
+	} else if (st == CALL_ACTIVE && p->state != LINE_CALL && p->hw.cleared && !p->hw.off_hook && !p->ending
+	    && !p->machine_answering && !p->fe_call && !p->fe_answering && !p->fe_dial
 	    && !(p->nlegs > 1 && (legs_with(p, LEG_HELD) || legs_with(p, LEG_WAITING)))
 	    && !p->released_one && !p->recall) {
 		/* the call connected after the handset went down (the answer was sent, then the caller hung up): end it.
@@ -1123,6 +1310,7 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 			stamped(log, "  channel %u: the remote answered\n", ch);
 		if (p->state == LINE_RELEASE)
 			(void)osc_stop_once(c, ch, log);		/* the held call was taken back after a failed second call */
+		p->answered_by = PHONE_ANSWERED_HANDSET;	/* the handset is on the call now */
 		set_line(p, LINE_CALL, now);
 		if (p->dir == PHONE_DIR_IN)
 			p->calls_in++;
@@ -1132,6 +1320,7 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 		 * is already off; the front end starts the greeting from the ANSWERED event and records the caller */
 		p->machine_call = 1;
 		p->machine_answering = 0;
+		p->answered_by = PHONE_ANSWERED_MACHINE;
 		set_line(p, LINE_CALL, now);
 		if (p->dir == PHONE_DIR_IN)
 			p->calls_in++;
@@ -1150,6 +1339,7 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 		}
 	} else if (st == CALL_GONE) {
 		const int machine_was = machine_clear(p);
+		const int fe_was = p->fe_call || p->fe_answering || p->fe_dial;
 
 		if (machine_was) {
 			/* the machine's call is over: the line goes quiet at once (nobody at the handset waits for a tone),
@@ -1159,6 +1349,17 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 			set_line(p, LINE_IDLE, now);
 			stamped(log, "  channel %u: the answering machine's call ended\n", ch);
 			emit_machine(p, PHONE_MACHINE_ENDED, now);
+		} else if (fe_was) {
+			/* the front end's call is over: the line goes quiet at once, with no release tone into an empty
+			 * handset; the record keeps who answered it */
+			p->fe_call = 0;
+			p->fe_answering = 0;
+			p->fe_ata_ok = 0;
+			p->fe_dial = 0;
+			p->cause = p->cause_pending = p->cause_want = 0;
+			call_over(p);
+			set_line(p, LINE_IDLE, now);
+			stamped(log, "  channel %u: the front end's call ended\n", ch);
 		} else if (p->state == LINE_SETUP || p->state == LINE_CALL) {
 			/* the network released the call: an outgoing attempt before the answer, or the remote ended a
 			 * connected call while the caller is still on the line -- the release tone says the line is free
@@ -1187,21 +1388,28 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 				modem_cmd(p, "AT+CHUP", ch, log);
 			}
 		} else {
+			quiet_judge(p, ch, log);	/* the identity, the clock and the window, as they stand this step */
 			/* the answering machine: an offered call left alone for the delay is answered by the line itself.
 			 * Never a call that waited for the user's flash, or one ringing back from hold: the user was already
 			 * told of those. The delay counts from the call's first listing; 0 answers at once, without a ring. */
-			if (p->cfg.machine && !hook_off && p->offered && !p->recall && !p->wait_promoted
-			    && !p->machine_answering && !p->machine_failed && p->state == LINE_IDLE && !p->ring_end_ms
+			/* a silent window leaves the call alone; a machine window hands it to the machine */
+			if (p->cfg.machine && !(p->quieted && p->quiet_mode != DND_MODE_MACHINE)
+			    && !hook_off && p->offered && !p->recall && !p->wait_promoted
+			    && !p->machine_answering && !p->machine_failed && !p->fe_answering && !p->fe_call
+			    && p->state == LINE_IDLE && !p->ring_end_ms
 			    && elapsed_ms(now, p->rec_start_ms) >= p->cfg.machine_delay_ms) {
 				p->machine_answering = 1;
 				p->machine_ata_ok = 0;
+				p->answered_by = PHONE_ANSWERED_MACHINE;
 				if (p->ringing)
 					(void)ring_stop(c, ch, p, "the answering machine answers", log);
 				stamped(log, "  channel %u: the answering machine answers (%llu ms after the call came)\n", ch,
 					elapsed_ms(now, p->rec_start_ms));
 				emit(p, PHONE_EV_MACHINE, now);
 			}
-			if (!hook_off && !p->machine_answering && !p->ringing && p->ring_ready && p->call->ring && !p->ring_end_ms
+			/* quiet hours: the call is offered and a lift answers it, but nothing on this side is driven */
+			if (!hook_off && !p->machine_answering && !p->fe_answering && !p->ringing && p->ring_ready && p->call->ring && !p->ring_end_ms
+			    && !p->quieted
 			    && p->state == LINE_IDLE && !(err = ring_start(c, ch, p, now, log)))
 				stamped(log, "  channel %u: the phone rings for the incoming call\n", ch);
 			/* a handset lifted after the call was offered answers it; one who is dialling keeps the line */
@@ -1219,9 +1427,22 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 					stamped(log, "  channel %u: the answering machine could not answer: the phone rings on\n", ch);
 				}
 			}
+			/* the front end's answer on the same retry gate; when the modem never takes it the call is the
+			 * handset's again and the ring returns at the next list */
+			if (p->fe_answering && !p->fe_ata_ok) {
+				if (p->tries < CALL_TRY_MAX) {
+					answer_incoming(p, ch, log);
+				} else {
+					p->fe_answering = 0;
+					p->fe_failed = 1;
+					p->answered_by = PHONE_ANSWERED_NONE;	/* nobody answered after all */
+					stamped(log, "  channel %u: the front end could not answer: the phone rings on\n", ch);
+				}
+			}
 		}
 	} else if (st == CALL_NONE) {
 		const int machine_was = machine_clear(p);
+		const int fe_was = p->fe_call || p->fe_answering || p->fe_dial;
 
 		call_over(p);
 		if (machine_was) {
@@ -1229,6 +1450,23 @@ static int on_call_state(struct chip *c, unsigned int ch, struct phone *p, int s
 			set_line(p, LINE_IDLE, now);
 			stamped(log, "  channel %u: the answering machine's call ended\n", ch);
 			emit_machine(p, PHONE_MACHINE_ENDED, now);
+		} else if (fe_was) {
+			/* the list dropped the front end's call without the gone step: the line is free at once, no tone */
+			p->fe_call = 0;
+			set_line(p, LINE_IDLE, now);
+			stamped(log, "  channel %u: the front end's call ended\n", ch);
+		} else if (p->state == LINE_CALL || (p->state == LINE_SETUP && p->setup_said)) {
+			/* the list dropped the call without the gone step (3GPP TS 27.007 lists only the calls it has):
+			 * a connected call the handset was on, or an outgoing attempt the list had already shown being set
+			 * up (a list that never listed a fresh dial is the modem catching up, not a release). The line
+			 * hears the release tone (ITU-T E.182) instead of silence. */
+			(void)osc_stop_once(c, ch, log);
+			p->gone_from = p->state;
+			p->cause = 0;
+			p->cause_pending = 1;
+			p->cause_want = 1;
+			release_tone_start(p, now);
+			set_line(p, LINE_RELEASE, now);
 		}
 	}
 	return err;
@@ -1310,6 +1548,23 @@ static void on_cmd_done(struct chip *c, unsigned int ch, struct phone *p, int re
 
 	if (!strncmp(p->mq_cmd, "ATD", 3)) {
 		if (res && p->state == LINE_SETUP) {
+			if (p->fe_dial) {
+				/* the front end's attempt: no tone into the empty handset, the line is free at once, and the
+				 * record says the call never came through */
+				p->fe_dial = 0;
+				p->cause = p->cause_pending = 0;
+				p->rec_cause = 0;
+				p->rec_gone_ms = now;
+				record_close(p, now);
+				p->call_id = 0;
+				p->dir = PHONE_DIR_NONE;
+				p->call_since_ms = p->answered_ms = 0;
+				p->peer[0] = 0;
+				set_line(p, LINE_IDLE, now);
+				stamped(log, "  channel %u: the network refused the front end's dial (%d: %s)\n", ch, res, why);
+				emit(p, PHONE_EV_CALL, now);
+				return;
+			}
 			/* a dial the network refuses takes the release tone */
 			stamped(log, "  channel %u: the network refused the dial (%d: %s), the busy tone\n", ch, res, why);
 			p->cause = 0;
@@ -1328,6 +1583,8 @@ static void on_cmd_done(struct chip *c, unsigned int ch, struct phone *p, int re
 			stamped(log, "  channel %u: the answer was refused (try %u; %d: %s)\n", ch, p->tries, res, why);
 		if (!res && p->machine_answering)
 			p->machine_ata_ok = 1;		/* the machine's answer is taken: the list follows, and no second answer goes out */
+		if (!res && p->fe_answering)
+			p->fe_ata_ok = 1;		/* the same accepted answer serves the front end's answer */
 	} else if (!strcmp(p->mq_cmd, "AT+CHUP")) {
 		if (!res) {
 			stamped(log, "  channel %u: hang-up sent\n", ch);
@@ -1337,11 +1594,10 @@ static void on_cmd_done(struct chip *c, unsigned int ch, struct phone *p, int re
 			stamped(log, "  channel %u: the hang-up was refused (%d: %s); it is sent again at the next call list\n", ch, res, why);
 		}
 	} else if (!strncmp(p->mq_cmd, "AT+QDAI=", 8) && p->hd_stage == HD_QDAI_WRITE) {
-		p->hd_stage = HD_CFUN;
+		p->hd_stage = HD_READBACK;
 		if (res)
 			stamped(log, "  channel %u: the PCM rate write was refused (%d: %s): the modem is restarted as it is\n", ch, res, why);
 		modem_cmd(p, "AT+CFUN=1,1", ch, log);	/* the reply never comes: the modem restarts and the port is found again */
-		p->hd_want = 0;
 		stamped(log, "  channel %u: the modem restarts for the new PCM mode\n", ch);
 	} else if (!strncmp(p->mq_cmd, "AT+CHLD=1", 9) && p->abandon_cmd) {
 		p->abandon_cmd = 0;
@@ -1386,7 +1642,9 @@ static void modem_lost(struct chip *c, unsigned int ch, struct phone *p, unsigne
 	p->port_lost = 1;
 	p->cause_want = 0;
 	p->hd_stage = HD_IDLE;
-	p->hd_want = 0;			/* an HD exchange in flight died with the port: the next settings change starts it over */
+	/* the wish survives the lost port: the restart that took it away is usually the service's own AT+CFUN, and the modem's
+		   answer when the port returns is exactly what the exchange is waiting for. The asks are bounded, so a
+		   port that never comes back cannot keep asking. */
 	if (p->fwd_stage != FWD_STAGE_IDLE) {
 		p->fwd_stage = FWD_STAGE_IDLE;
 		p->fwd_net.applying = 0;
@@ -1419,7 +1677,7 @@ static void modem_lost(struct chip *c, unsigned int ch, struct phone *p, unsigne
 	set_line(p, LINE_RELEASE, now);
 }
 
-/* how soon the call list is asked for again: fast while the call changes (set-up, our hang-up, just answered), else once a second */
+/* how soon the call list is asked for again: fast while the call changes (set-up, a hang-up sent from here, just answered), else once a second */
 static unsigned int poll_ms(const struct phone *p, unsigned long long now)
 {
 	if (p->state == LINE_SETUP || p->ending || (p->answered_ms && elapsed_ms(now, p->answered_ms) < FAST_AFTER_ANSWER_MS))
@@ -1494,23 +1752,38 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		return;				/* no answer: the old value stays, the next round asks again */
 	/* a reply of another shape is no verdict: the value that was known stays */
 	if (!strcmp(cmd, "AT+QDAI?")) {
+		char head[8];
+
 		keep_known(&p->audio_slave, modemq_audio_slave(text));
+		keep_known(&p->audio_rate, modemq_audio_rate(text));
+		if (modemq_qdai_head(text, head, sizeof(head)) && !p->qdai_head[0])
+			memcpy(p->qdai_head, head, sizeof(p->qdai_head));	/* the first field, written back as the modem prints it */
 		if (p->audio_slave == 0 && !p->audio_warned) {
 			p->audio_warned = 1;
 			stamped(p->log, "  channel %u: warning: the modem is not in slave mode (AT+QDAI?): the voice path cannot work; it is not changed here\n", p->ch);
+		}
+		/* the rate the modem puts on the bus is kept here for the status and for the exchange below. Nothing is
+		   decided from it: the question is read-only, and the answer may land after the handset was lifted -
+		   a bring-up must never be owed against a line somebody is using. */
+		if (p->hd_stage == HD_READBACK && p->audio_rate != MQ_UNKNOWN) {
+			/* the modem came back at the rate it was not asked for: the exchange is over for this round and
+			   the idle step decides whether to ask once more or to leave it */
+			p->hd_stage = HD_IDLE;
 		}
 	} else if (!strcmp(cmd, "AT+CLVL=?")) {
 		clvl_range_known(p, text);
 	} else if (!strcmp(cmd, "AT+CPIN?")) {
 		keep_known(&p->sim_ready, modemq_sim_ready(text));
-	} else if (!strcmp(cmd, "AT+QDAI?")) {
-		char head[8];
-
-		keep_known(&p->audio_slave, modemq_audio_slave(text));
-		if (modemq_qdai_head(text, head, sizeof(head)) && !p->qdai_head[0])
-			memcpy(p->qdai_head, head, sizeof(p->qdai_head));
 	} else if (!strcmp(cmd, "AT+CEREG?")) {
-		keep_known(&p->registered, modemq_registered(text));
+		int reg = modemq_registered(text);
+
+		keep_known(&p->registered, reg);
+		if (reg == 0) {
+			p->mcc[0] = 0;		/* off the network: the plan in force stays, the code is nothing until it camps again */
+			p->netname[0] = 0;
+			p->mcc_named = 0;
+			p->mcc_warned = 0;
+		}
 	} else if (!strncmp(cmd, "AT+QCFG", 7)) {
 		keep_known(&p->ims, modemq_ims(text));
 	} else if (!strcmp(cmd, "AT+QCSQ")) {
@@ -1523,12 +1796,38 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		if (n != MQ_UNKNOWN)
 			p->clir_status = status;
 	} else if (!strcmp(cmd, "AT+QNWINFO")) {
-		char net[MQ_NETWORK_MAX], band[MQ_NETWORK_MAX];
+		char net[MQ_NETWORK_MAX], band[MQ_NETWORK_MAX], mcc[MQ_MCC_MAX];
 
 		modemq_network(text, net, sizeof(net), band, sizeof(band));
 		if (net[0]) {
 			memcpy(p->network, net, sizeof(net));
 			memcpy(p->band, band, sizeof(band));
+		}
+		/* the same network in the modem's own query, where this one carries the PLMN as digits; it says nothing
+		 * when the standard +COPS? read already gave them */
+		if (modemq_operator(text, "+QNWINFO:", 1, mcc, sizeof(mcc), NULL, 0) == 1) {
+			memcpy(p->mcc, mcc, sizeof(mcc));
+			p->mcc_named = 0;
+			p->mcc_warned = 0;
+		} else if (!p->mcc[0] && p->mcc_named && !p->mcc_warned) {
+			p->mcc_warned = 1;
+			stamped(p->log, "  channel %u: the modem names its network '%s': no digits to choose a numbering plan from\n",
+				p->ch, p->netname);
+		}
+	} else if (!strcmp(cmd, "AT+COPS?")) {
+		char mcc[MQ_MCC_MAX], name[MQ_NETWORK_MAX];
+		int verdict = modemq_operator(text, "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name));
+
+		if (verdict == 1) {
+			memcpy(p->mcc, mcc, sizeof(mcc));
+			p->mcc_named = 0;
+			p->mcc_warned = 0;
+		} else if (verdict == 0) {
+			/* the network as the modem names it. This board answers the standard read with a name where the numeric
+			 * form was asked for: the digits then come from its own query above, and the name is kept for the page
+			 * and for the line that says no digits arrived from either */
+			p->mcc_named = 1;
+			snprintf(p->netname, sizeof(p->netname), "%s", name);
 		}
 	}
 }
@@ -1707,12 +2006,63 @@ static const char *dial_target(const char *dial)
 	return !strncmp(dial, "#31#", 4) || !strncmp(dial, "*31#", 4) ? dial + 4 : dial;
 }
 
+/* the number a front end may dial: what the keypad can send, plus a leading + for which the keypad has no key;
+ * a lone star or hash is no dial string there either */
+static int dial_number_ok(const char *number)
+{
+	size_t n, k;
+
+	if (!number)
+		return 0;
+	n = strlen(number);
+	if (!n || n > DIAL_NUMBER_MAX)
+		return 0;
+	if ((number[0] == '*' || number[0] == '#') && n == 1)
+		return 0;
+	for (k = 0; k < n; k++) {
+		const char d = number[k];
+
+		if ((d >= '0' && d <= '9') || d == '*' || d == '#')
+			continue;
+		if (d == '+' && k == 0)
+			continue;
+		return 0;
+	}
+	return 1;
+}
+
+/*
+ * The quiet-hours code, from whichever door it arrives: the line answers it, nothing goes to the network, and the
+ * daemon - which owns the clock and the windows - is told on the event. An incoming call needs the network, the wish
+ * does not, so this is the one ask the line answers with no modem to talk to. The handset that dialled it is handed
+ * its tone back; the typed code comes with the handset down and the line idle, where there is nothing to hand over.
+ */
+static void quiet_ask(struct phone *p, enum dnd_code code, unsigned int ch, unsigned long long now, FILE *log)
+{
+	int manual = code == DND_CODE_ON ? DND_MANUAL_ON : DND_MANUAL_OFF;
+
+	p->dial[0] = 0;
+	p->dial_last_ms = 0;
+	if (p->state == LINE_DIALLING)
+		set_line(p, has_modem(p) ? LINE_DIAL_TONE : LINE_NO_SERVICE, now);
+	stamped(log, "  channel %u: the phone's code asks for quiet hours %s\n", ch,
+		manual == DND_MANUAL_ON ? "on" : "off");
+	emit_dnd(p, manual, now);
+}
+
 /* the collected digits go to the network as ATD...; (3GPP TS 27.007); the bridge already carries both ways, so
  * the speech opens by itself when the remote answers. A dial the network refuses takes the release tone */
 static void dial_out(unsigned int ch, struct phone *p, unsigned long long now, FILE *log)
 {
 	char cmd[5 + DIAL_NUMBER_MAX + 1];
+	enum dnd_code code = dnd_code_of(p->dial);
 
+	/* the codes the handset dials for itself are answered before anything else: they are not a dial and they go
+	 * nowhere. A code collected here is the handset's own ask, so no front end is in the line's hand. */
+	if (code != DND_CODE_NONE) {
+		quiet_ask(p, code, ch, now, log);
+		return;
+	}
 	if (!has_modem(p))
 		return;					/* no call control: the digits stay a log only */
 	if (!p->dial[1] && (p->dial[0] == '*' || p->dial[0] == '#')) {
@@ -1733,9 +2083,17 @@ static void dial_out(unsigned int ch, struct phone *p, unsigned long long now, F
 		rec.result = phone_result_of(PHONE_DIR_OUT, 0, 0, 1, 0);
 		if (p->hooks.call_ended)
 			p->hooks.call_ended(p->hooks.ctx, &rec);
-		stamped(log, "  channel %u: a blocked number was dialled: the congestion tone, no call is made\n", ch);
+		if (p->fe_dial)
+			stamped(log, "  channel %u: the front end asked for a blocked number: no call is made\n", ch);
+		else
+			stamped(log, "  channel %u: a blocked number was dialled: the congestion tone, no call is made\n", ch);
 		p->dial[0] = 0;
 		p->dial_last_ms = 0;
+		if (p->fe_dial) {
+			/* nothing was dialled: the line stays idle and silent, and phone_dial() reports the refusal */
+			p->fe_dial = 0;
+			return;
+		}
 		p->cause = 34;
 		p->cause_pending = 0;
 		release_tone_start(p, now);
@@ -1759,16 +2117,62 @@ static void dial_out(unsigned int ch, struct phone *p, unsigned long long now, F
 	set_line(p, LINE_SETUP, now);
 }
 
+/* the line holds nothing a dial would have to share: no call in any hand, no dial half-typed, nobody at the handset */
+static int line_free_for_dial(const struct phone *p)
+{
+	return p->state == LINE_IDLE && !p->call_id && !p->incoming && !p->offered && !p->rec_open &&
+		!p->hw.off_hook && !p->ringing && !p->machine_answering && !p->fe_answering && !p->fe_call && !p->dial[0];
+}
+
+/* a front end dials a number the line would dial from the keypad: the same path, with the handset down */
+int phone_dial(struct phone *p, const char *number, enum phone_answered_by via)
+{
+	enum dnd_code code;
+
+	if (!dial_number_ok(number))
+		return -EINVAL;
+	code = dnd_code_of(number);
+	/* a quiet-hours code typed on the page is the ask the handset's keys make, so it goes to the same door and is
+	 * answered the same way - off network too, because a wish about this line's bell needs no call control. The
+	 * guards a dial needs still hold, so a code never lands on a line already busy. It is not a dial and it leaves no
+	 * dialling in the line's hand: the code answers here rather than through dial_out, which is where a front-end
+	 * flag would otherwise be set and stay set, and every call after it read as the page's own. */
+	if (code != DND_CODE_NONE) {
+		if (!line_free_for_dial(p))
+			return -EBUSY;
+		quiet_ask(p, code, p->ch, clock_ms(p->c), p->log);
+		return 0;
+	}
+	if (!has_modem(p) || !service_ok(p))
+		return -ENODEV;
+	if (!line_free_for_dial(p))
+		return -EBUSY;
+	snprintf(p->dial, sizeof(p->dial), "%s", number);
+	p->fe_dial = 1;
+	dial_out(p->ch, p, clock_ms(p->c), p->log);
+	p->fe_via = via;	/* the dial began a call and call_begin reset the door: the dialler's stands after it */
+	return p->fe_dial ? 0 : -EPERM;		/* the blocked branch dials nothing and clears the flag */
+}
+
 /* the outgoing call's progress tones on the board's own tone preset (the dial tone's oscillators): the ringing
  * tone from the alerting until the answer, the busy or the congestion tone after a release before the answer,
  * the ITU-T E.180 cadences on the clock; a release tone stops after half a minute so the waiting state returns */
+#define CAUSE_WAIT_MS	1200u	/* the release tone waits this long for AT+CEER, then the busy tone is its fallback */
+
 static void progress_tick(struct chip *c, unsigned int ch, struct phone *p, unsigned long long now, FILE *log)
 {
 	unsigned long long on, pos;
 	int want;
 
-	if (p->state == LINE_RELEASE && p->cause_pending)
-		return;					/* the cause decides the cadence: the tone waits for it */
+	if (p->state == LINE_RELEASE && p->cause_pending) {
+		if (elapsed_ms(now, p->prog_start_ms) < CAUSE_WAIT_MS)
+			return;				/* the cause decides the cadence: the tone waits for it, briefly */
+		/* no cause came (the query is stuck or the modem is silent): ITU-T E.182 still wants a release tone, and
+		 * the busy tone is its fallback */
+		p->cause = 0;
+		p->cause_pending = 0;
+		stamped(log, "  channel %u: the release cause did not come: the busy tone\n", ch);
+	}
 	if (p->state == LINE_RELEASE && elapsed_ms(now, p->prog_start_ms) >= RELEASE_TONE_MAX_MS) {
 		(void)osc_stop_once(c, ch, log);
 		set_line(p, LINE_IDLE, now);			/* still off-hook: the dial tone returns at the next hook read */
@@ -1780,8 +2184,15 @@ static void progress_tick(struct chip *c, unsigned int ch, struct phone *p, unsi
 			p->prog_on = 0;
 		return;
 	}
+	if (p->fe_dial || (p->fe_call && !p->hw.off_hook)) {
+		/* the front end's call: the peer hears the network's own ringback through the audio path, and the
+		 * handset is not in the call, so no local tone plays */
+		if (p->prog_on == 1 && !osc_stop_once(c, ch, log))
+			p->prog_on = 0;
+		return;
+	}
 	if (p->state == LINE_SETUP && (p->net_tone || p->cfg.ringback == PHONE_RINGBACK_OFF)) {
-		if (p->prog_on == 1 && !osc_stop_once(c, ch, log))	/* the network's audio (or the option) has the ringing: ours is off, mid-burst too */
+		if (p->prog_on == 1 && !osc_stop_once(c, ch, log))	/* the network's audio (or the option) has the ringing: the local tone is off, mid-burst too */
 			p->prog_on = 0;
 		return;
 	}
@@ -1832,7 +2243,8 @@ static void present_dial_tone(struct chip *c, unsigned int ch, struct phone *p, 
 		return;
 	}
 	set_line(p, LINE_DIAL_TONE, now);
-	stamped(log, "  channel %u: dial tone on (the caller is off-hook, hook reg 0x%02x)\n", ch, lcr);
+	stamped(log, "  channel %u: dial tone on (%s, hook reg 0x%02x)\n", ch,
+		(lcr & LCR_ON_HOOK) ? "the handset is up" : "the handset is down: recall dial tone", lcr);
 }
 
 /* the listed legs as "idx:state" words, for the log of a hang-up decision (states only, never a number) */
@@ -1963,7 +2375,7 @@ static void hook_machine(struct chip *c, unsigned int ch, struct phone *p, uint8
 		 * caller's again, and an answered machine call carries on with the person now listening (the front end
 		 * stops the greeting and the message from the TAKEN event) */
 		{
-			const int answered = p->machine_answering && p->machine_ata_ok;
+			const int answered = (p->machine_answering && p->machine_ata_ok) || (p->fe_answering && p->fe_ata_ok);
 
 			if (p->machine_answering) {
 				p->machine_answering = 0;
@@ -1974,6 +2386,22 @@ static void hook_machine(struct chip *c, unsigned int ch, struct phone *p, uint8
 				stamped(log, "  channel %u: the handset takes the answering machine's call\n", ch);
 				emit_machine(p, PHONE_MACHINE_TAKEN, now);
 			}
+			if (p->fe_answering) {
+				/* the handset wins the offered call: the answer on its way is the caller's now, and the lift
+				 * below answers at once if nothing went out yet */
+				p->fe_answering = 0;
+				p->answered_by = PHONE_ANSWERED_HANDSET;
+				stamped(log, "  channel %u: the handset came up while the front end was answering: the call is the handset's\n", ch);
+			}
+			if (p->fe_call && p->state == LINE_CALL) {
+				/* the handset takes the front end's *active* call over: the call goes on, now with the person
+				 * listening, and the front end is told of the new owner. A call on hold is not taken here: the
+				 * lift gets the recall dial tone, and the held call stays the page's until it is taken back */
+				p->fe_call = 0;
+				p->answered_by = PHONE_ANSWERED_HANDSET;
+				stamped(log, "  channel %u: the handset takes the front end's call\n", ch);
+				emit(p, PHONE_EV_CALL, now);
+			}
 			/* the ring trip: a handset lifted while an offered call is incoming answers it now, not at the next call list
 			 * (ETSI EN 300 001: the called party's answer is the loop closing). Not when the machine's answer is already
 			 * accepted: that would put a second ATA on the call. The machine's failed tries are not the person's: the lift
@@ -1981,8 +2409,9 @@ static void hook_machine(struct chip *c, unsigned int ch, struct phone *p, uint8
 			 * that retries, so its flag is the only reason to reset) */
 			if (p->machine_failed && p->incoming && p->offered && p->tries >= CALL_TRY_MAX)
 				p->tries = 0;
-			if (!answered && p->incoming && p->offered && p->tries < CALL_TRY_MAX && p->state <= LINE_DIAL_TONE)
+			if (!answered && p->incoming && p->offered && p->tries < CALL_TRY_MAX && p->state <= LINE_DIAL_TONE) {
 				answer_incoming(p, ch, log);
+			}
 			present_dial_tone(c, ch, p, lcr, log);
 		}
 		break;
@@ -2002,6 +2431,7 @@ static void hook_machine(struct chip *c, unsigned int ch, struct phone *p, uint8
 		} else if (flash_use(p) != FLASH_NOTHING) {
 			p->flash_open = 1;			/* a key now is a code; none: the flash alone acts (take the waiting call, hold, swap, take back) */
 			p->flash_until_ms = now + FLASH_CODE_MS;
+			p->flash_via = PHONE_ANSWERED_HANDSET;
 		} else if (p->state == LINE_RELEASE && p->incoming && p->wait_promoted) {
 			answer_incoming(p, ch, log);		/* the call that waited is now ringing in: a flash takes it */
 		}
@@ -2060,6 +2490,16 @@ static int hook_step(struct chip *c, unsigned int ch, struct phone *p, FILE *log
 	}
 	p->read_fail = 0;
 	now = clock_ms(c);
+	if (p->ringing) {
+		const uint8_t bits = lcr & (LCR_RTP | LCR_ON_HOOK);
+
+		if (bits != p->ring_lcr) {
+			stamped(log, "  channel %u: hook register 0x%02x -> 0x%02x while ringing%s\n", ch, p->ring_lcr, bits,
+				(bits & LCR_RTP) && !(bits & LCR_ON_HOOK) ? " (the chip's ring trip)" :
+				(bits & LCR_ON_HOOK) ? " (the loop closed)" : "");
+			p->ring_lcr = bits;
+		}
+	}
 	p->lcr = lcr;
 	if (p->hook_at_ms) {
 		unsigned int gap = (unsigned int)(now - p->hook_at_ms);
@@ -2079,9 +2519,9 @@ static int hook_step(struct chip *c, unsigned int ch, struct phone *p, FILE *log
 }
 
 /*
- * Speed dial (the page's U28): two digits and the send key dial the first number of the contact that has that code. The same two digits
- * without the send key are an ordinary number that goes out after the pause. A number that is an emergency number as dialled is never replaced
- * and a stored number too long for the dial buffer is not used.
+ * Speed dial: two digits and the send key dial the first number of the contact that has that code. The same two
+ * digits without the send key are an ordinary number that goes out after the pause. A number that is an emergency
+ * number as dialled is never replaced and a stored number too long for the dial buffer is not used.
  */
 static void speed_dial(struct phone *p, unsigned int ch, FILE *log)
 {
@@ -2241,11 +2681,15 @@ static void apply_cfg(struct phone *p, unsigned long long now)
 	if (p->pending_cfg.forward.configured && !forward_same(&p->cfg.forward, &p->pending_cfg.forward))
 		p->fwd_want = 1;
 	if (p->pending_cfg.hd != p->cfg.hd) {
-		/* the chip side takes hold at once (the line is idle); the modem's PCM rate follows in the exchange */
-		if (wideband_apply(p->c, p->ch, &p->wb, p->pending_cfg.hd, p->log) == 0)
-			p->hd_want = 1;
-		else
-			stamped(p->log, "  channel %u: the wideband registers did not take: the modem is left as it was\n", p->ch);
+		/* the wish alone moves nothing: the chip's band, the PCM slots and the bridge are one layout and the modem
+		   decides whether 16 kHz is even on the bus. The exchange below asks the modem; the layout follows its word. */
+		p->hd_want = 1;
+		p->hd_gave_up = 0;
+		p->hd_waiting = 0;
+		p->hd_asks = 0;
+		p->hd_stage = HD_IDLE;
+		stamped(p->log, "  channel %u: HD voice %s: the modem's PCM rate is asked first, the line follows its answer\n",
+			p->ch, p->pending_cfg.hd ? "on" : "off");
 	}
 	p->cfg = p->pending_cfg;
 	if (clir_changed) {
@@ -2282,7 +2726,7 @@ struct phone *phone_attach(struct chip *c, unsigned int ch, const struct board *
 	p->next_ring_ms = now + RING_POLL_MS;
 	p->next_sample_ms = now + GUARD_MS;
 	p->poll_due_ms = now;
-	p->sim_ready = p->registered = p->ims = p->rsrp_dbm = p->audio_slave = p->clir = p->clir_status = p->ccwa_net = MQ_UNKNOWN;
+	p->sim_ready = p->registered = p->ims = p->rsrp_dbm = p->audio_slave = p->audio_rate = p->clir = p->clir_status = p->ccwa_net = MQ_UNKNOWN;
 	p->fwd_want = p->cfg.forward.configured;
 	modem_setup(p, now);			/* the service's modem setup (volatile settings of the modem) */
 	return p;
@@ -2382,6 +2826,7 @@ int phone_open(struct phone **out, struct chip *c, const struct board *b, const 
 			p->ring_ready = ring_ok;
 			p->det_on = det_on;
 			p->wb = wb;		/* the wideband state was applied before the phone existed: it moves into it here */
+			p->hd_inforce = cfg->hd ? 1 : 0;	/* the layout the hardware was actually brought up with, whatever the settings wish */
 		}
 	}
 	if (!err) {
@@ -2554,11 +2999,37 @@ int phone_step(struct phone *p, unsigned long long now)
 	    !p->ringing && !p->incoming && !p->mq_waiting) {
 		char cmd[MODEM_CMD_MAX];
 
-		stamped(p->log, "  channel %u: HD voice %s: the modem's PCM rate changes and the modem restarts (mobile data drops for about half a minute)\n",
-			p->ch, p->cfg.hd ? "on" : "off");
-		snprintf(cmd, sizeof(cmd), "AT+QDAI=%s,1,0,4,0,%d,1,1", p->qdai_head[0] ? p->qdai_head : "x", p->cfg.hd ? 1 : 0);
-		p->hd_stage = HD_QDAI_WRITE;
-		modem_cmd(p, cmd, p->ch, p->log);
+		if (p->audio_rate == MQ_UNKNOWN) {
+			/* the modem has not answered with its rate yet, and the idle questions are the ones that ask:
+			   restarting a modem that may already be at the wanted rate would drop the mobile data for
+			   nothing, so the change waits for that one answer */
+			if (!p->hd_waiting) {
+				p->hd_waiting = 1;
+				stamped(p->log, "  channel %u: HD voice %s: the modem's PCM rate has not been read yet; the change waits for it\n",
+					p->ch, p->cfg.hd ? "on" : "off");
+			}
+		} else if (p->audio_rate == (p->cfg.hd ? 1 : 0)) {
+			/* the modem already keeps the wanted rate - it persists in the modem across its restarts - so
+			   there is nothing to ask and no data to drop: the line is what owes the bring-up */
+			p->hd_want = 0;
+			p->hd_layout_due = 1;
+			stamped(p->log, "  channel %u: the modem already answers %d kHz: the line is brought up at that rate\n",
+				p->ch, p->cfg.hd ? 16 : 8);
+		} else if (p->hd_asks < HD_ASK_MAX) {
+			p->hd_asks++;
+			stamped(p->log, "  channel %u: HD voice %s: the modem's PCM rate changes and the modem restarts (mobile data drops for about half a minute)\n",
+				p->ch, p->cfg.hd ? "on" : "off");
+			snprintf(cmd, sizeof(cmd), "AT+QDAI=%s,1,0,4,0,%d,1,1", p->qdai_head[0] ? p->qdai_head : "x", p->cfg.hd ? 1 : 0);
+			p->hd_stage = HD_QDAI_WRITE;
+			modem_cmd(p, cmd, p->ch, p->log);
+		} else if (!p->hd_gave_up) {
+			/* a modem that answers the other rate is not asked again: the line keeps working at the rate it
+			   has, and the setting is taken up again by the next change or the next start */
+			p->hd_gave_up = 1;
+			p->hd_want = 0;
+			stamped(p->log, "  channel %u: the modem is left at %d kHz: HD voice waits for the next settings change\n",
+				p->ch, p->audio_rate == MQ_UNKNOWN ? 0 : (p->audio_rate ? 16 : 8));
+		}
 	}
 	t0 = clock_ms(c);
 	if (!err)
@@ -2622,10 +3093,103 @@ int phone_close(struct phone *p, int err)
 
 int phone_hangup(struct phone *p)
 {
+	if (p->state == LINE_RELEASE)
+		return -ENOENT;			/* the network already released it: nothing is left to hang up */
 	if (!p->call_id && !p->incoming && p->state != LINE_SETUP && p->state != LINE_CALL)
 		return -ENOENT;
 	p->ending = 1;
 	modem_cmd(p, "AT+CHUP", p->ch, p->log);
+	return 0;
+}
+
+/* a front end answers an offered call: the ring stops and the answer goes out from the call-list step, as the
+ * machine's does, so that a refusal can be retried there */
+int phone_answer(struct phone *p, enum phone_answered_by via)
+{
+	unsigned long long now;
+
+	if (p->machine_answering || p->fe_answering || p->fe_call || p->hw.off_hook)
+		return -EBUSY;			/* somebody already has it, or the line is not free for it */
+	if (!p->incoming || !p->offered || p->refused || !p->call_id || p->dir != PHONE_DIR_IN)
+		return -ENOENT;			/* nothing is ringing to answer */
+	if (p->fe_failed)
+		p->tries = 0;			/* the failed tries of an earlier request are not this one's */
+	p->fe_answering = 1;
+	p->fe_failed = 0;
+	p->fe_via = via;
+	p->answered_by = via;
+	now = clock_ms(p->c);
+	p->step_ms = now;
+	p->poll_due_ms = now;			/* the answer goes out at the next step, not after a poll interval */
+	if (p->ringing)
+		(void)ring_stop(p->c, p->ch, p, "the front end answers", p->log);
+	emit(p, PHONE_EV_CALL, now);
+	return 0;
+}
+
+/*
+ * A front end takes the call the answering machine holds: the same door a lift at the handset opens (hook_machine),
+ * from the other side. Nothing goes to the modem - the call is already answered and on the line; only its listener
+ * changes. The machine's own side closes on the TAKEN event with the message it has so far, and the recording is the
+ * call's, not the machine's, so it carries on. Whoever already has the line is asked first: a person at the handset
+ * or a front end that took the call a moment ago keeps it, and a second door does not move the caller twice.
+ */
+int phone_takeover(struct phone *p, enum phone_answered_by via)
+{
+	unsigned long long now;
+
+	if (p->hw.off_hook || p->fe_call || p->fe_answering)
+		return -EBUSY;			/* a person at the phone or a front end already has this call */
+	if (!p->machine_call)
+		return -ENOENT;			/* the machine holds nothing to hand over: none came, or its answer is still on its way */
+	now = clock_ms(p->c);
+	p->machine_call = 0;
+	p->fe_call = 1;
+	p->fe_via = via;
+	p->answered_by = via;
+	stamped(p->log, "  channel %u: the front end takes the answering machine's call\n", p->ch);
+	emit_machine(p, PHONE_MACHINE_TAKEN, now);
+	emit(p, PHONE_EV_CALL, now);
+	return 0;
+}
+
+/* one digit on the cellular leg of a live call, whichever side is listening */
+int phone_dtmf(struct phone *p, char digit)
+{
+	if (!p->call_id || p->state != LINE_CALL)
+		return -ENOENT;
+	if (!((digit >= '0' && digit <= '9') || digit == '*' || digit == '#' || (digit >= 'A' && digit <= 'D')))
+		return -EINVAL;
+	/* the key after a flash is a code (TS 22.030 in-call codes), as it is at the handset; a key that is no code
+	 * goes on to the network as an ordinary tone */
+	if (p->flash_open && flash_code(p, digit))
+		return 0;
+	p->flash_open = 0;
+	send_key(p, digit, p->ch, p->log);
+	return 0;
+}
+
+/* A front end's flash: what the handset's flash key does in a call, hold, swap, take the waiting call or take the
+ * held call back. The flash alone acts at the window's end (flash_alone); a digit within FLASH_CODE_MS is a code. */
+int phone_flash(struct phone *p)
+{
+	struct hookwatch_cfg hk;
+	unsigned int width = FLASH_SOFT_MS;
+
+	if (!has_modem(p))
+		return -ENODEV;
+	if (flash_use(p) == FLASH_NOTHING)
+		return -ENOENT;
+	/* the break the button stands in for sits inside the hook's own flash window, as a person's would */
+	hk = hook_limits(p);
+	if (width < hk.flash_min_ms)
+		width = hk.flash_min_ms;
+	if (width >= hk.flash_max_ms)
+		width = hk.flash_max_ms - 1;
+	p->flash_open = 1;
+	p->flash_until_ms = clock_ms(p->c) + FLASH_CODE_MS;
+	p->flash_via = PHONE_ANSWERED_WEB;
+	stamped(p->log, "  channel %u: hook flash of %u ms (the page)\n", p->ch, width);
 	return 0;
 }
 
@@ -2651,6 +3215,16 @@ int phone_hd_active(const struct phone *p)
 	return wideband_active(&p->wb);
 }
 
+/* the layout is owed once the modem has answered with the rate the setting asks for, and only while the line is quiet */
+int phone_layout_due(struct phone *p, int *want)
+{
+	if (want)
+		*want = p->cfg.hd ? 1 : 0;
+	if (!p->hd_layout_due)
+		return 0;
+	return p->state == LINE_IDLE && !p->hw.off_hook && !p->ringing && !p->incoming && p->call_seen == CALL_NONE;
+}
+
 int phone_set_cfg(struct phone *p, const struct phone_cfg *cfg)
 {
 	if (cfg->channel != p->cfg.channel)
@@ -2674,6 +3248,8 @@ void phone_status(const struct phone *p, struct phone_status *st)
 	st->line = phone_line_of(p);
 	st->off_hook = p->hw.off_hook;
 	st->machine = machine_state(p);
+	st->quiet = p->quieted;
+	st->answered_by = p->answered_by;
 	st->call_id = p->call_id;
 	st->dir = p->dir;
 	st->call = (enum call_state)p->call_seen;
@@ -2694,6 +3270,7 @@ void phone_status(const struct phone *p, struct phone_status *st)
 	st->registered = p->registered == MQ_UNKNOWN ? PHONE_UNKNOWN : p->registered;
 	st->ims_registered = p->ims == MQ_UNKNOWN ? PHONE_UNKNOWN : p->ims;
 	st->audio_slave = p->audio_slave == MQ_UNKNOWN ? PHONE_UNKNOWN : p->audio_slave;
+	st->audio_rate = p->audio_rate == MQ_UNKNOWN ? PHONE_UNKNOWN : p->audio_rate;
 	st->signal_dbm = p->rsrp_dbm == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->rsrp_dbm;
 	st->fwd = p->fwd_net;
 	if (!st->fwd.done)
@@ -2702,6 +3279,8 @@ void phone_status(const struct phone *p, struct phone_status *st)
 	st->clir = p->clir == MQ_UNKNOWN ? PHONE_UNKNOWN : p->clir;
 	st->clir_status = p->clir_status == MQ_UNKNOWN ? PHONE_UNKNOWN : p->clir_status;
 	snprintf(st->network, sizeof(st->network), "%s", p->network);
+	snprintf(st->mcc, sizeof(st->mcc), "%s", p->mcc);
+	snprintf(st->netname, sizeof(st->netname), "%s", p->netname);
 	st->modem_timeouts = p->modem_timeouts;
 	st->modem_reply_ms = p->modem_reply_ms;
 	st->faults = p->faults;

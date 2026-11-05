@@ -50,6 +50,7 @@ enum phone_ringback { PHONE_RINGBACK_AUTO, PHONE_RINGBACK_ON, PHONE_RINGBACK_OFF
 struct phonebook;
 struct alarms;
 struct blocking;
+struct dnd;
 struct number_region;
 
 struct phone_cfg {
@@ -72,6 +73,7 @@ struct phone_cfg {
 	struct phone_forward forward;	/* the network forwarding to set (forward.configured = 0: never touched) */
 	const struct alarms *alarms;	/* alarm calls (NULL = none); owned by the front end, changed only between two steps */
 	const struct blocking *block;	/* call blocking rules (NULL = none); owned by the front end, changed only between two steps */
+	const struct dnd *dnd;		/* quiet hours (NULL = none); owned by the front end, changed only between two steps */
 	int machine;			/* 1 = the answering machine may answer an offered incoming call after machine_delay_ms (the cellular leg only) */
 	unsigned int machine_delay_ms;	/* 0..60000: counted from the call's first listing; 0 answers at once */
 	int service_log;		/* 1 = the running service's log: no digit, number or name ever appears in it */
@@ -83,7 +85,7 @@ struct phone_cfg {
 };
 
 /*
- * How a finished call ended, for the call log (the page's contract v2 `result`). The release causes are 3GPP TS 24.008
+ * How a finished call ended, for the call log (the page's `result` field). The release causes are 3GPP TS 24.008
  * numbers (as AT+CEER reports them): 17 user busy, 18 no user responding, 19 no answer from the user (alerting timeout).
  */
 enum phone_result { PHONE_RES_ANSWERED, PHONE_RES_MISSED, PHONE_RES_REJECTED, PHONE_RES_BLOCKED, PHONE_RES_BUSY, PHONE_RES_NO_ANSWER, PHONE_RES_FAILED };
@@ -107,7 +109,13 @@ enum phone_machine {
 	PHONE_MACHINE_ENDED,		/* the machine's call is over (an event only) */
 };
 
-enum phone_event_kind { PHONE_EV_LINE, PHONE_EV_CALL, PHONE_EV_MACHINE };
+/* who answered the call: the handset, the answering machine, or a front-end through the line's own answer path */
+enum phone_answered_by { PHONE_ANSWERED_NONE, PHONE_ANSWERED_HANDSET, PHONE_ANSWERED_MACHINE, PHONE_ANSWERED_WEB, PHONE_ANSWERED_SIP };
+
+/* the fixed words for the API: none, handset, machine, web, sip */
+const char *phone_answered_by_name(enum phone_answered_by who);
+
+enum phone_event_kind { PHONE_EV_LINE, PHONE_EV_CALL, PHONE_EV_MACHINE, PHONE_EV_DND };
 
 struct phone_event {
 	enum phone_event_kind kind;
@@ -116,6 +124,10 @@ struct phone_event {
 	enum phone_dir dir;
 	enum call_state call;		/* the modem's view of the call (CALL_NONE when there is none) */
 	int machine;			/* enum phone_machine: NONE / ANSWERING / ANSWERED for line and call events; the reason for a machine event */
+	enum phone_answered_by answered_by;	/* who answered the call the event is about (NONE when nobody did) */
+	int quiet;			/* quiet hours hold this call: the line is offered, nothing on this side is driven. It
+					 * travels with the event because a front end's ring is decided in this step, not the last */
+	int manual;			/* enum dnd_manual, for a PHONE_EV_DND event: what the handset's code asked for */
 	unsigned long long at_ms;	/* the step's clock time */
 };
 
@@ -128,6 +140,7 @@ struct phone_call_record {
 	unsigned long long end_ms;		/* the network released it (or the last time it was seen, or the dial was refused) */
 	int cause;				/* TS 24.008, 0 = unknown */
 	enum phone_result result;
+	enum phone_answered_by answered_by;	/* who answered the call (NONE when nobody did) */
 };
 
 /* The front end's side. Every member is optional (NULL = not used). */
@@ -179,6 +192,8 @@ struct phone_status {
 	enum phone_line line;
 	int off_hook;
 	int machine;				/* enum phone_machine: NONE, ANSWERING or ANSWERED (TAKEN and ENDED are events) */
+	int quiet;					/* 1 = quiet hours cover this caller: the call is offered, nothing on this side is driven and no network phone is invited */
+	enum phone_answered_by answered_by;	/* who answered the current call */
 	unsigned int leg_count;			/* the voice calls the modem lists (0 when none) */
 	struct phone_leg_status legs[PHONE_LEGS_MAX];
 	unsigned int call_id;
@@ -192,11 +207,14 @@ struct phone_status {
 	int registered;				/* AT+CEREG? stat 1 or 5: 1 / 0 / PHONE_UNKNOWN */
 	int ims_registered;			/* the modem's IMS state (AT+QCFG="ims"): 1 / 0 / PHONE_UNKNOWN */
 	int audio_slave;			/* AT+QDAI? second field 1 = the modem is the PCM slave (the bridge needs it): 1 / 0 / PHONE_UNKNOWN */
+	int audio_rate;				/* AT+QDAI? sixth field: the rate the modem puts on the bus - 0 = 8 kHz (one sample a frame), 1 = 16 kHz (a second half a frame later), PHONE_UNKNOWN until it is read */
 	int signal_dbm;				/* from AT+CESQ (RSRP) or PHONE_DBM_UNKNOWN */
 	int call_waiting_net;			/* AT+CCWA=1,2 read-back: 1 the network has call waiting on, 0 off, PHONE_UNKNOWN */
 	int clir;				/* AT+CLIR? setting: 0 network, 1 hide, 2 show, or PHONE_UNKNOWN */
 	int clir_status;			/* AT+CLIR? provisioning: 0..4 (see modemq.h) or PHONE_UNKNOWN */
 	char network[24];			/* the access technology for display ("4G", "5G", ...), "" when unknown */
+	char mcc[4];				/* the network the line is registered on: three digits (ITU-T E.212), "" until it is read; the numbering plan follows it when `region` is auto */
+	char netname[24];			/* what the modem calls its network, where it answers with a name instead of the digits ("" until it does) */
 	unsigned int modem_timeouts;		/* modem requests that got no reply in time, since the start */
 	unsigned long long modem_reply_ms;	/* the clock time of the modem's last reply (0 = none yet) */
 	unsigned int faults;			/* failed chip reads and guard trips since the start */
@@ -210,9 +228,9 @@ struct phone;
 
 /*
  * Bring the line into service: protected mode, the line fed (forward active), the impedance and tone presets, the
- * tone detector, the voice path at our PCM positions, the bridge (hooks->bridge_start), the ring generator. The chip
- * must already have run stages 0..4. On failure everything done so far is undone (line open, detector restored) and
- * *out stays NULL. 0 or -errno.
+ * tone detector, the voice path at the router's PCM positions, the bridge (hooks->bridge_start), the ring generator.
+ * The chip must already have run stages 0..4. On failure everything done so far is undone (line open, detector
+ * restored) and *out stays NULL. 0 or -errno.
  */
 int phone_open(struct phone **out, struct chip *c, const struct board *b, const struct call_ops *call,
 	const struct phone_cfg *cfg, const struct phone_hooks *hooks, FILE *log);
@@ -227,8 +245,44 @@ int phone_step(struct phone *p, unsigned long long now);
 /* 1 while the chip's wideband mode is applied (the HD voice setting in force) */
 int phone_hd_active(const struct phone *p);
 
+/*
+ * Whether the audio path must be brought up again at another rate, and at which one (*want: 1 = 16 kHz, 0 = 8 kHz).
+ * The HD setting alone never moves the hardware: the line chip's band, the PCM block's slots and the bridge's flag are
+ * one layout, and the PCM slots cannot be changed while the bus runs - the clocks and the chip's own bring-up go with
+ * them. So the core asks for the layout only after the modem itself has answered with the rate the setting wants, on
+ * a line nobody is using; the daemon then closes the line, brings the hardware up and opens the line again with
+ * *want. Returns 1 while the rebuild is owed and nobody is using the line: a rebuild takes the line down for a few
+ * seconds, so an owe raised before the handset went back waits for the line to clear instead of cutting a call.
+ * Nothing acknowledges it: the state is derived again from the setting, the layout in force and the modem's own
+ * answer, so a bring-up that failed is owed again at the next read rather than remembered as done.
+ */
+int phone_layout_due(struct phone *p, int *want);
+
 /* End the current call or call attempt (AT+CHUP through the modem queue). 0, -ENOENT when there is none. */
 int phone_hangup(struct phone *p);
+
+/* A front-end asks for what a person at the handset could do, and gets a refusal that changed nothing.
+ * phone_answer: an offered incoming call, with the handset down. 0, -ENOENT (nothing is ringing to answer),
+ *   -EBUSY (the handset or the machine already has it, or the line is not free for it).
+ * phone_dial: an outgoing call from a free idle line. 0, -EINVAL (not a number this line dials),
+ *   -ENODEV (no modem, or no service), -EBUSY (the line is in use), -EPERM (the blocking rules refuse the number;
+ *   the call log records it and nothing was dialled).
+ * phone_dtmf: one digit on the cellular leg of a live call. 0, -ENOENT (no call), -EINVAL (not a digit). A digit
+ *   within the flash window is a flash code, as it is at the handset.
+ * phone_flash: the hook flash a person at the handset could make in a call: hold, swap, take the waiting call, take
+ *   the held call back. The break it stands in for is FLASH_SOFT_MS wide, inside the hook's own flash window (the
+ *   flash_min_ms..flash_max_ms settings); the flash alone acts at the window's end, a digit within it is a code. 0,
+ *   -ENODEV (no modem), -ENOENT (nothing a flash can do on this line now). */
+/* an answer asked from outside: the page's own endpoint, or the installed service's leg through the object */
+int phone_answer(struct phone *p, enum phone_answered_by via);
+/* the same outside door for a caller the answering machine already holds: the front end takes that call over, the
+ * way a lift at the handset does (PHONE_MACHINE_TAKEN), and the message keeps what it recorded up to now.
+ * 0; -EBUSY when somebody already has the line (the handset is up, or a front end answered or took the call); -ENOENT
+ * when the machine holds nothing to hand over (no call, or its own answer is still on its way). */
+int phone_takeover(struct phone *p, enum phone_answered_by via);
+int phone_dial(struct phone *p, const char *number, enum phone_answered_by via);
+int phone_dtmf(struct phone *p, char digit);
+int phone_flash(struct phone *p);
 
 /* Ring the idle phone for 1..RING_TEST_MAX_SECONDS without a call. 0; -EBUSY when not idle or off-hook; -EINVAL. */
 int phone_ring_test(struct phone *p, unsigned int seconds);
@@ -247,7 +301,7 @@ int phone_set_cfg(struct phone *p, const struct phone_cfg *cfg);
 void phone_modem_up(struct phone *p);
 
 /*
- * The line test (the page's U36): three samples 100 ms apart of the hook, the battery and the loop current while the line is idle with the handset
+ * The line test: three samples 100 ms apart of the hook, the battery and the loop current while the line is idle with the handset
  * down, then a verdict. It runs inside phone_step() (no waiting); start it, then call phone_line_test_poll() until it reports the result.
  *   off_hook      the handset was up in a sample;           no_battery  the battery is below the feed guard (LF_HOLD_GUARD_MV under the converter's value);
  *   interrupted   a call or a ring began during the test;   leak        reserved: the on-hook loop current above LINE_TEST_LEAK_UA. The threshold is
@@ -281,6 +335,13 @@ void phone_status(const struct phone *p, struct phone_status *st);
 
 /* The line's state as a fixed lower-case name for the API ("idle", "ringing", "dial_tone", ...). */
 const char *phone_line_name(enum phone_line line);
+
+/* A flash takes a held call back from the recall dial tone, or from an idle line while that tone's start is still
+ * settling: the tone is cosmetic, the held leg is the fact. */
+static inline int phone_flash_resume_ok(enum phone_line line)
+{
+	return line == PHONE_LINE_DIAL_TONE || line == PHONE_LINE_IDLE;
+}
 
 /*
  * Take the line out of service: the ring stops, a call is hung up (best effort, one queued AT+CHUP pumped for at most

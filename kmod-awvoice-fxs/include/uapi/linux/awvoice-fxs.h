@@ -107,8 +107,8 @@ struct awfxs_regs {
 
 struct awfxs_bridge {
 	__u32 mode;
-	__u32 modem_rx;		/* position of the modem's sample in what we receive */
-	__u32 modem_tx;		/* position of the modem's sample in what we send */
+	__u32 modem_rx;		/* position of the modem's sample in what the bridge receives */
+	__u32 modem_tx;		/* position of the modem's sample in what the bridge sends */
 	__u32 line_rx;
 	__u32 line_tx;
 	__u32 flags;		/* AWFXS_BRIDGE_WIDEBAND or 0; the wideband frame needs slots 0..11 enabled */

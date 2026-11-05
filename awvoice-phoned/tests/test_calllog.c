@@ -136,6 +136,7 @@ static void test_files(void)
 	char *lbuf = NULL;
 	size_t lsize = 0;
 
+	a.answered_by = PHONE_ANSWERED_MACHINE;	/* the machine took it: the record says who did */
 	fresh_dir();
 	l = new_log(0);
 	calllog_add(l, &a, 1700000000ull, NULL, "1700000000-1.wav");
@@ -148,7 +149,7 @@ static void test_files(void)
 	assert(stat(ram, &sb) == 0 && (sb.st_mode & 0777) == 0600);
 	assert(strstr(slurp(ram), "{\"id\":2,\"type\":\"OUT\",\"number\":\"45\",\"ts\":1700000100,\"durationSec\":0,\"result\":\"busy\",\"cause\":17,\"recording\":\"1700000100-9.wav\"},"));
 	assert(strstr(slurp(ram), "\"recording\":\"1700000100-9.wav\""));	/* the recording rides the entry that owns it */
-	assert(strstr(slurp(ram), "{\"id\":1,\"type\":\"IN\",\"number\":\"5551\",\"ts\":1700000000,\"durationSec\":65,\"result\":\"answered\",\"cause\":0,\"message\":\"1700000000-1.wav\"}"));
+	assert(strstr(slurp(ram), "{\"id\":1,\"type\":\"IN\",\"number\":\"5551\",\"ts\":1700000000,\"durationSec\":65,\"result\":\"answered\",\"cause\":0,\"message\":\"1700000000-1.wav\",\"answeredBy\":\"machine\"}"));
 	assert(strstr(slurp(ram), "\"message\":\"1700000000-1.wav\""));		/* and so does the machine's message */
 	assert(calllog_persist(l, CALLLOG_FLASH_MS - 1, 0) == 0 && !slurp(flash));
 	assert(calllog_persist(l, CALLLOG_FLASH_MS, 0) == 0 && slurp(flash) && !l->flash_dirty);
@@ -166,6 +167,7 @@ static void test_files(void)
 	assert(back->e[2].duration_s == 65 && back->e[2].ts == 1700000000ull && back->e[2].type == CALLLOG_IN);
 	assert(!strcmp(back->e[1].recording, "1700000100-9.wav") && !back->e[2].recording[0]);	/* the name round-trips, the absent stays absent */
 	assert(!strcmp(back->e[2].message, "1700000000-1.wav") && !back->e[1].message[0]);	/* the same for the machine's message */
+	assert(back->e[2].answered_by == PHONE_ANSWERED_MACHINE && back->e[1].answered_by == PHONE_ANSWERED_NONE);	/* and the one who took it */
 	assert(!back->ram_dirty && !back->flash_dirty);
 	/* after a reboot only the flash copy is there */
 	unlink(ram);
