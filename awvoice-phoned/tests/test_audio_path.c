@@ -219,7 +219,7 @@ static void ring_in(struct rig *r)
 }
 
 /* the person at the handset answers: no front end and no machine, so the only reason the samples cross is the call
- * itself (an answer asked from outside leaves its own owner flag behind, and that is a different test) */
+ * itself (an answer asked from outside leaves its own answering flag behind, and that is a different test) */
 static void call_up(struct rig *r)
 {
 	handset(r, 1);

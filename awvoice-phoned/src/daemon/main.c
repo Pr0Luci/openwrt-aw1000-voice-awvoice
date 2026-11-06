@@ -1778,7 +1778,7 @@ static int hook_bridge_stop(void *ctx)
  * Who needs the samples crossing right now. The core knows the line and the calls; it cannot see a recording in
  * progress, a greeting halfway through the file, or a page holding the microphone, so those come to it as claims and
  * the decision stays in one place (src/core/phone.h, phone_audio_claim). The mapping is only ever from the sinks and
- * the playback owner: nothing here decides anything, it says what is alive.
+ * the playback's current holder: nothing here decides anything, it says what is alive.
  */
 static void audio_claims(struct daemon *dm)
 {
