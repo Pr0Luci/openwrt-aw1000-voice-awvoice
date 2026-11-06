@@ -15,6 +15,18 @@ function yn(v, yes, no) {
 	return v ? [ yes, 'av-ok' ] : [ no, 'av-err' ];
 }
 
+/* the audio path in one word: standing by is the normal state of a quiet line, and only a path that is wanted and
+   not running is a fault the page must show in red */
+function audioWord(state) {
+	if (state === 'crossing')
+		return [ _('Crossing samples'), 'av-ok' ];
+	if (state === 'standing-by')
+		return [ _('Standing by'), 'av-mut' ];
+	if (state === 'refused')
+		return [ _('Wanted, not running'), 'av-err' ];
+	return [ _('Unknown'), 'av-mut' ];
+}
+
 /* the network the line is on: what the modem calls it, with the country code beside it when both are known */
 function netWord(name, mcc) {
 	if (name && mcc) return name + ' (' + mcc + ')';
@@ -164,14 +176,19 @@ return baseclass.extend({
 			]);
 
 			var mod = yn(h.system.moduleLoaded, _('Loaded'), _('Not loaded')), br = h.system.bridge;
-			var run = yn(br.running, _('Running'), _('Stopped'));
+			var ap = (h.system || {}).audio || {}, run = ap.state ? audioWord(ap.state) : yn(br.running, _('Running'), _('Stopped'));
+			/* the counters belong to one run of the bridge: they start again when the path comes up, so the page says
+			   which run it is showing rather than leaving a small number to be read as a quiet week */
 			fill(sys, [
 				[ _('Kernel module'), mod[0], mod[1] ],
 				[ _('Audio bridge'), run[0], run[1] ],
+				[ _('Needed by'), ap.state ? (ap.why || '—') : '—' ],
+				[ _('Times brought up'), ap.state ? [ count(ap.starts), count(ap.stops) ].join(' / ') : '—', 'av-mono' ],
 				[ _('Frames carried'), count(br.frames), 'av-mono' ],
 				[ _('Resyncs'), count(br.resyncs), 'av-mono' ],
 				[ _('Frames skipped'), count(br.txSkipped), 'av-mono' ],
-				[ _('Longest gap'), br.maxGapUs == null ? '—' : br.maxGapUs + ' µs', 'av-mono' ]
+				[ _('Longest gap'), br.maxGapUs == null ? '—' : br.maxGapUs + ' µs', 'av-mono' ],
+				[ _('Last failure'), ap.lastError || '—', ap.lastError ? 'av-err' : '' ]
 			]);
 
 			var st = h.storage || {}, rec = st.recordings, msg = st.messages;

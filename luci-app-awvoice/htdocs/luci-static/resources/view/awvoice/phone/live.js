@@ -87,6 +87,19 @@ function tri(v) { return v === true || v === false ? v : null; }
 function num(v) { return typeof v === 'number' && isFinite(v) ? v : null; }
 function str(v) { return typeof v === 'string' ? v : ''; }
 
+/* The audio path's one word, from the two facts the daemon gives: a quiet line with nothing crossing is the normal
+ * state and must not read as a fault, while something needing the samples and not getting them is exactly the fault
+ * the load figure used to hide. A reply without the block (an older daemon) leaves the word null, and the page then
+ * falls back on the bridge's own running flag rather than guessing. */
+function audioPathOf(a) {
+	if (!a || typeof a.running !== 'boolean')
+		return { state: null, why: '', upMs: null, starts: null, stops: null, lastError: '' };
+	return {
+		state: a.running === true ? 'crossing' : (a.wanted === true ? 'refused' : 'standing-by'),
+		why: str(a.why), upMs: num(a.upMs), starts: num(a.starts), stops: num(a.stops), lastError: str(a.lastError)
+	};
+}
+
 function downStatus() {
 	return {
 		state: 'down', line: 'down', hook: null, machine: null, quiet: null, call: null,
@@ -133,7 +146,7 @@ function normHealth(r) {
 			operator: str(m.operator) || null, operatorName: str(m.operatorName) || null,
 			audioSlave: tri(m.audioSlave), hdVoice: str(m.hdVoice) || null, clir: m.clir === 'network' || m.clir === 'hide' || m.clir === 'show' ? m.clir : null, clirStatus: str(m.clirStatus) || null },
 		system: { moduleLoaded: tri(s.moduleLoaded), bridge: { running: tri(b.running), frames: num(b.frames), resyncs: num(b.resyncs),
-			txSkipped: num(b.txSkipped), maxGapUs: num(b.maxGapUs) } },
+			txSkipped: num(b.txSkipped), maxGapUs: num(b.maxGapUs) }, audio: audioPathOf(s.audioPath) },
 		indicator: { led: str(i.led) || null, state: str(i.state) || null,
 			leds: Array.isArray(i.leds) ? i.leds.map(str).filter(function(x) { return x; }) : [] },
 		counters: { modemTimeouts: num(k.modemTimeouts), hookGapsOver20ms: num(k.hookGapsOver20ms),

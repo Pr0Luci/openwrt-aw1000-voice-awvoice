@@ -207,6 +207,29 @@ async function main() {
 	assert.deepStrictEqual(h.web, { mode: null, audio: null, port: 0 });
 	assert.deepStrictEqual(h.sip, { objectOwner: null, lastRefusal: null, consumerPid: null });
 
+	// the audio path's one word: standing by is the normal state of a quiet line, a path that is wanted and not
+	// running is the fault, and a reply without the block leaves the page on the bridge's own flag rather than a guess
+	t = makeProvider({ replies: { 'awvoice.health': { system: { bridge: { running: true },
+		audioPath: { running: true, wanted: true, why: 'call', upMs: 4200, starts: 3, stops: 2, lastError: '' } } } } });
+	h = await t.p.getHealth();
+	assert.deepStrictEqual(h.system.audio, { state: 'crossing', why: 'call', upMs: 4200, starts: 3, stops: 2, lastError: '' });
+	t = makeProvider({ replies: { 'awvoice.health': { system: { bridge: { running: false },
+		audioPath: { running: false, wanted: false, why: 'idle', upMs: 0, starts: 3, stops: 3, lastError: '' } } } } });
+	assert.strictEqual((await t.p.getHealth()).system.audio.state, 'standing-by');
+	t = makeProvider({ replies: { 'awvoice.health': { system: { audioPath: { running: false, wanted: true,
+		why: 'recording', lastError: 'No such device' } } } } });
+	h = await t.p.getHealth();
+	assert.strictEqual(h.system.audio.state, 'refused');
+	assert.strictEqual(h.system.audio.lastError, 'No such device');
+	t = makeProvider({ replies: { 'awvoice.health': { system: { bridge: { running: true } } } } });
+	h = await t.p.getHealth();
+	assert.strictEqual(h.system.audio.state, null);
+	// and the page asks for that word rather than painting a standing-by path as stopped
+	assert.ok(/ap\.state \? audioWord\(ap\.state\) : yn\(br\.running/.test(healthSrc),
+		'the health tab no longer falls back on the bridge flag when the daemon says nothing');
+	assert.ok(/'Wanted, not running'/.test(healthSrc), 'the refused state has no word to show');
+	assert.ok(/Standing by/.test(healthSrc), 'the standing-by state has no word to show');
+
 	// the numbering plan in force and the network it came from travel; a daemon that publishes neither, or publishes
 	// the two as null before it has asked, leaves both null rather than a country without a name
 	t = makeProvider({ replies: { 'awvoice.health': { line: { numbering: 'LK' }, modem: { operator: '413', operatorName: 'Dialog Dialog' } } } });
