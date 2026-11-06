@@ -14,6 +14,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "board.h"
@@ -127,6 +128,13 @@ static void rig_open(struct rig *r)
 	the_rig = r;
 	assert(phone_open(&r->p, &r->c, &r->b, &r->ops, &r->cfg, &r->hooks, r->log) == 0 && r->p);
 	r->now = r->c.ops->now_ms(&r->m);
+}
+
+/* the memstream the phone logged into: closed and freed, or the gate's sanitizer calls it a leak */
+static void rig_close(struct rig *r)
+{
+	fclose(r->log);
+	free(r->lbuf);
 }
 
 static void step(struct rig *r)
@@ -247,6 +255,8 @@ static void test_bring_up_leaves_it_running(void)
 	assert(count_of(&r, 'u') == 1 && count_of(&r, 'd') == 0);
 	assert(view_of(&r).up == 1 && view_of(&r).starts == 1);
 	phone_close(r.p, 0);
+	rig_close(&r);
+
 }
 
 /* ... and the watch lets it down once the line has been quiet for the grace, once only: the load the path costs while
@@ -266,6 +276,8 @@ static void test_quiet_line_stands_it_by(void)
 	assert(count_of(&r, 'd') == 1 && count_of(&r, 'u') == 1);	/* standing by is a state, not a loop */
 	phone_close(r.p, 0);					/* nothing to stop: the close says no more about it */
 	assert(count_of(&r, 'd') == 1);
+	rig_close(&r);
+
 }
 
 /* a lifted handset with nothing behind it is dial tone and digits: the chip makes the first and the modem queue
@@ -285,6 +297,8 @@ static void test_handset_alone_keeps_it_down(void)
 	assert(line_of(&r) == PHONE_LINE_DIAL_TONE);
 	handset(&r, 0);
 	phone_close(r.p, 0);
+	rig_close(&r);
+
 }
 
 /* the moment the modem lists a call, the path is up again - and it is said which reason brought it up */
@@ -313,6 +327,8 @@ static void test_a_call_brings_it_up(void)
 	run_ms(&r, 1000);
 	assert(count_of(&r, 'd') == 2 && view_of(&r).up == 0);
 	phone_close(r.p, 0);
+	rig_close(&r);
+
 }
 
 /* what a sink says it needs is a reason too: a recording keeps the path up with no call behind it, and the claim is
@@ -336,6 +352,8 @@ static void test_a_claim_holds_it_up(void)
 	run_ms(&r, AUDIO_GRACE_MS + 500);
 	assert(count_of(&r, 'd') == 2 && view_of(&r).up == 0);
 	phone_close(r.p, 0);
+	rig_close(&r);
+
 }
 
 /* a sink that arms itself against the bridge needs the path under it now, not at the next tick - and when the module
@@ -357,6 +375,8 @@ static void test_apply_answers_now(void)
 	assert(phone_audio_apply(r.p, r.now) == 0);
 	assert(view_of(&r).up == 1 && view_of(&r).last_error == 0);
 	phone_close(r.p, 0);
+	rig_close(&r);
+
 }
 
 /* the try is cheap and the log line is not: a module that keeps refusing is said once, tried again on the backoff,
@@ -382,6 +402,8 @@ static void test_failure_is_said_once_and_retried(void)
 	assert(view_of(&r).up == 1);
 	assert(count_in(log_text(&r), "came up for the message") == 1);
 	phone_close(r.p, 0);
+	rig_close(&r);
+
 }
 
 /* the line is brought up again for another layout: the path the earlier bring-up started does not outlive it, so the
@@ -395,6 +417,8 @@ static void test_close_stops_what_open_started(void)
 	assert(view_of(&r).up == 1);
 	assert(phone_close(r.p, 0) == 0);
 	assert(count_of(&r, 'd') == 1);				/* one start, one stop: the symmetry the leak was missing */
+	rig_close(&r);
+
 }
 
 /* a stop that the module refuses is not swallowed: the path stays up, the try comes again, and the health reply
@@ -414,6 +438,8 @@ static void test_a_refused_stop_is_tried_again(void)
 	run_ms(&r, AUDIO_RETRY_MS + 500);
 	assert(view_of(&r).up == 0);
 	phone_close(r.p, 0);
+	rig_close(&r);
+
 }
 
 /* a front end with no audio device at all - the stage tool, and the core's other test rigs - is served exactly as
@@ -436,6 +462,8 @@ static void test_without_bridge_hooks(void)
 	assert(r.seq_count == 0 && !view_of(&r).wanted);
 	phone_close(r.p, 0);
 	assert(r.seq_count == 0);
+	rig_close(&r);
+
 }
 
 int main(void)
