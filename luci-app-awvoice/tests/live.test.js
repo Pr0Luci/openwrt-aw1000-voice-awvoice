@@ -1341,7 +1341,7 @@ async function main() {
 	assert.strictEqual(l.peak, 0);
 	assert.ok(l.gain >= 0 && l.gain <= LV.gainMax, 'silence invents nothing, gain ' + l.gain);
 
-	/* The ceiling has to be told the size of the samples that are still inside the delay line, not of an average of
+	/* the ceiling has to be told the size of the samples that are still inside the delay line, not of an average of
 	   the recent ones: an average needs milliseconds to rise, and a swing that has already begun is on the wire before
 	   it does. A talker a little over the nominal level reached full scale that way, and the step into the telephone's
 	   own range has nothing above full scale to put there, so the far end heard the word cut off flat. */
@@ -1357,7 +1357,7 @@ async function main() {
 				if (y > 1)
 					over++;
 			}
-			return { peak, over, lvl };
+			return { peak, over };
 		};
 		/* a talker's own shape: syllables with silence between them, three harmonics, and the room's hiss in the gaps */
 		const speech = (peak, gap, rate) => {
