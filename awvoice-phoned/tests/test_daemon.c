@@ -1300,6 +1300,7 @@ static unsigned int full_cycle_ms(void)
 }
 
 static const char *cereg_reply = "+CEREG: 0,1\r\n\r\nOK\r\n";
+static const char *ims_reply = "+QCFG: \"ims\",0,1\r\n\r\nOK\r\n";	/* as captured on the router: the second field 1 = registered */
 static const char *qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";	/* as captured on the router: the second field 1 = slave */
 static const char *clvl_range_reply = "+CLVL: (0-5)\r\n\r\nOK\r\n";
 static const char *qnwinfo_reply = "+QNWINFO: \"FDD LTE\",\"41302\",\"LTE BAND 3\",1725\r\n\r\nOK\r\n";	/* as captured on the router: the PLMN in digits */
@@ -1312,7 +1313,7 @@ static const char *modem_text(void *user, const char *cmd)
 	if (!strcmp(cmd, "AT+CLVL=?")) return clvl_range_reply;
 	if (!strcmp(cmd, "AT+CPIN?")) { asked[0]++; return "AT+CPIN?\r\r\n+CPIN: READY\r\n\r\nOK\r\n"; }
 	if (!strcmp(cmd, "AT+CEREG?")) { asked[1]++; return cereg_reply; }
-	if (!strncmp(cmd, "AT+QCFG", 7)) { asked[2]++; return "+QCFG: \"ims\",0,1\r\n\r\nOK\r\n"; }
+	if (!strncmp(cmd, "AT+QCFG", 7)) { asked[2]++; return ims_reply; }
 	if (!strcmp(cmd, "AT+QCSQ")) { asked[3]++; return "+QCSQ: \"LTE\",-62,-93,8,-11\r\n\r\nOK\r\n"; }
 	if (!strcmp(cmd, "AT+CLIR?")) return "AT+CLIR?\r\r\n+CLIR: 1,4\r\n\r\nOK\r\n";
 	if (!strcmp(cmd, "AT+QNWINFO")) { asked[4]++; return qnwinfo_reply; }
@@ -2957,9 +2958,11 @@ static void test_no_service(void)
 	assert(status_of(&r).line == PHONE_LINE_IDLE);
 	rig_close(&r);
 
-	/* the modem is there but the network says not registered: congestion tone, and the keys are still dialled (emergency numbers) */
+	/* the modem is there but no network carries voice: the EPS answer says searching and IMS says unregistered.
+	   The congestion tone, and the keys are still dialled (emergency numbers) */
 	memset(asked, 0, sizeof(asked));
 	cereg_reply = "+CEREG: 0,2\r\n\r\nOK\r\n";			/* searching */
+	ims_reply = "+QCFG: \"ims\",0,0\r\n\r\nOK\r\n";			/* IMS unregistered: neither path carries voice */
 	rig_init(&r);
 	with_questions(&r);
 	rig_open(&r);
@@ -2978,8 +2981,26 @@ static void test_no_service(void)
 	handset(&r, 0);
 	run_ms(&r, 800);
 
+	/* a 5G SA network: the EPS answer stays "searching" and IMS says registered — the voice path is IMS, so the
+	   dial tone is owed and the network routes the call itself */
+	ims_reply = "+QCFG: \"ims\",0,1\r\n\r\nOK\r\n";
+	run_ms(&r, full_cycle_ms());
+	handset(&r, 1);
+	run_ms(&r, 100);
+	assert(status_of(&r).line == PHONE_LINE_DIAL_TONE);
+	handset(&r, 0);
+	run_ms(&r, 600);
+	ims_reply = "+QCFG: \"ims\",0,0\r\n\r\nOK\r\n";
+	run_ms(&r, full_cycle_ms());
+	handset(&r, 1);
+	run_ms(&r, 100);
+	assert(status_of(&r).line == PHONE_LINE_NO_SERVICE);
+	handset(&r, 0);
+	run_ms(&r, 600);
+
 	/* registered again: the dial tone is back for a lifted handset, and for one that was waiting in the no-service tone */
 	cereg_reply = "+CEREG: 0,1\r\n\r\nOK\r\n";
+	ims_reply = "+QCFG: \"ims\",0,1\r\n\r\nOK\r\n";
 	run_ms(&r, full_cycle_ms());
 	assert(status_of(&r).registered == 1);
 	handset(&r, 1);
@@ -2988,11 +3009,13 @@ static void test_no_service(void)
 	handset(&r, 0);
 	run_ms(&r, 600);
 	cereg_reply = "+CEREG: 0,0\r\n\r\nOK\r\n";
+	ims_reply = "+QCFG: \"ims\",0,0\r\n\r\nOK\r\n";
 	run_ms(&r, full_cycle_ms());
 	handset(&r, 1);
 	run_ms(&r, 100);
 	assert(status_of(&r).line == PHONE_LINE_NO_SERVICE);
 	cereg_reply = "+CEREG: 0,5\r\n\r\nOK\r\n";			/* roaming counts as service */
+	ims_reply = "+QCFG: \"ims\",0,1\r\n\r\nOK\r\n";
 	r.listed = CALL_NONE;
 	run_ms(&r, full_cycle_ms());
 	assert(status_of(&r).registered == 1 && status_of(&r).line == PHONE_LINE_DIAL_TONE);	/* it came back under the handset */

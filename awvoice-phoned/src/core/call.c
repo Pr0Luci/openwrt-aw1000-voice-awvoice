@@ -2221,15 +2221,16 @@ static void progress_tick(struct chip *c, unsigned int ch, struct phone *p, unsi
 
 /*
  * Is there service for a call? Without a modem client (the stage tool's bench stages) there is nothing to ask and the dial tone
- * is the rule. With one: the modem port is open and answering, and the network does not say "not registered" (+CEREG, an unknown
- * answer counts as service so that a lift right after the start is not refused). ITU-T E.180: the congestion tone says the call
- * cannot be set up.
+ * is the rule. With one: the modem port is open and answering, and a network carries voice — the EPS path (+CEREG 1/5, the
+ * VoLTE and CSFB route) or the IMS one (+QCFG="ims", the 5G route: on a 5G SA network the EPS answer legitimately stays
+ * "not registered" and the call goes out as a network-triggered fallback). An unknown answer counts as service so that a lift
+ * right after the start is not refused. ITU-T E.180: the congestion tone says the call cannot be set up.
  */
 static int service_ok(const struct phone *p)
 {
 	if (!p->call || !p->call->begin)
 		return 1;
-	return has_modem(p) && p->poll_bad < POLL_BAD_MAX && p->registered != 0;
+	return has_modem(p) && p->poll_bad < POLL_BAD_MAX && (p->registered != 0 || p->ims == 1);
 }
 
 /* the dial tone for a lifted handset: only when the line is idle and no call is ringing in */
@@ -2243,7 +2244,8 @@ static void present_dial_tone(struct chip *c, unsigned int ch, struct phone *p, 
 		/* no service: the congestion tone (the cadence runs from the progress tick); the keys are still collected when the modem is there (emergency numbers) */
 		release_tone_start(p, now);
 		set_line(p, LINE_NO_SERVICE, now);
-		stamped(log, "  channel %u: no service (%s): the congestion tone\n", ch, has_modem(p) ? "not registered" : "no modem");
+		stamped(log, "  channel %u: no service (%s): the congestion tone\n", ch,
+			has_modem(p) ? "no network carries voice yet" : "no modem");
 		p->info_next = info_index("AT+CEREG?");
 		p->info_due_ms = now;
 		return;

@@ -168,7 +168,7 @@ return baseclass.extend({
 			var ims = yn(h.modem.imsRegistered, _('Registered'), _('Not registered'));
 			var audio = yn(h.modem.audioSlave, _('Ready'), _('Not set'));
 			fill(modem, [
-				[ _('SIM'), sim[0], sim[1] ], [ _('Network registration'), reg[0], reg[1] ], [ _('VoLTE registration'), ims[0], ims[1] ],
+				[ _('SIM'), sim[0], sim[1] ], [ _('EPS registration'), reg[0], reg[1] ], [ _('VoLTE registration'), ims[0], ims[1] ],
 				[ _('Signal (RSRP)'), h.modem.rsrpDbm == null ? '—' : h.modem.rsrpDbm + ' dBm', 'av-mono' ],
 				[ _('Network'), h.modem.network || '—' ],
 				[ _('Operator'), netWord(h.modem.operatorName, h.modem.operator) ],
