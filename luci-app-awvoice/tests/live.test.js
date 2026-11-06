@@ -1341,6 +1341,77 @@ async function main() {
 	assert.strictEqual(l.peak, 0);
 	assert.ok(l.gain >= 0 && l.gain <= LV.gainMax, 'silence invents nothing, gain ' + l.gain);
 
+	/* The ceiling has to be told the size of the samples that are still inside the delay line, not of an average of
+	   the recent ones: an average needs milliseconds to rise, and a swing that has already begun is on the wire before
+	   it does. A talker a little over the nominal level reached full scale that way, and the step into the telephone's
+	   own range has nothing above full scale to put there, so the far end heard the word cut off flat. */
+	{
+		const wire = (make, seconds, rate) => {
+			const lvl = new globalThis.AwvoiceLevel(rate);
+			const s = make(rate);
+			let peak = 0, over = 0, k, y;
+			for (k = 0; k < Math.round(rate * seconds); k++) {
+				y = Math.abs(lvl.step(s()));
+				if (y > peak)
+					peak = y;
+				if (y > 1)
+					over++;
+			}
+			return { peak, over, lvl };
+		};
+		/* a talker's own shape: syllables with silence between them, three harmonics, and the room's hiss in the gaps */
+		const speech = (peak, gap, rate) => {
+			let k = 0;
+			return () => {
+				const t = k++ / rate, syl = 0.3, w = t % syl;
+				const env = w < syl * 0.5 ? Math.sin(Math.PI * w / (syl * 0.5)) : 0;
+				const v = (Math.sin(2 * Math.PI * 120 * t) + 0.5 * Math.sin(2 * Math.PI * 240 * t)
+					+ 0.3 * Math.sin(2 * Math.PI * 360 * t)) / 1.8;
+				return env ? peak * env * v : gap * Math.sin(2 * Math.PI * 1700 * t);
+			};
+		};
+
+		for (const peak of [ 0.7, 1 ]) {
+			const w = wire(r => speech(peak, 0.003, r), 4, 48000);
+			assert.strictEqual(w.over, 0, 'a talker whose own level is ' + peak + ' keeps every sample inside full scale');
+			assert.ok(w.peak <= LV.ceiling * 1.000001, 'and inside the ceiling, saw ' + w.peak);
+			assert.ok(w.peak >= LV.ceiling * 0.99, 'while still using the headroom the ceiling allows, saw ' + w.peak);
+		}
+		/* one swing out of nothing is the case an average cannot see: it is the largest sample in the line before the
+		   first millisecond of it has passed, and the only thing that can hold it down is reading the line itself */
+		const click = wire((r) => {
+			let k = 0;
+			return () => (k++ === Math.round(r * 0.2) ? 1 : 0.002 * Math.sin(2 * Math.PI * 1700 * k / r));
+		}, 2, 48000);
+		assert.ok(click.peak <= LV.ceiling * 1.000001, 'a single swing from silence is bounded by its own size, saw ' + click.peak);
+
+		/* the window, sample by sample, against a walk of the same window: the queue is allowed no stale entry, no
+		   entry it has dropped too early, and no size that the line does not actually hold */
+		{
+			const lvl = new globalThis.AwvoiceLevel(48000);
+			const win = lvl.win;
+			let seed = 20261106, hist = [], k, j, top, out;
+			const rnd = () => {
+				seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+				return seed / 0x7fffffff;
+			};
+			for (k = 0; k < 20000; k++) {
+				const p = rnd();
+				const x = (p < 0.02 ? 1 : p < 0.5 ? 0.2 : 0.002) * (rnd() < 0.5 ? 1 : -1);
+				hist.push(Math.abs(x));
+				out = lvl.step(x);
+				top = 0;
+				for (j = Math.max(0, hist.length - win); j < hist.length; j++)
+					if (hist[j] > top)
+						top = hist[j];
+				assert.ok(Math.abs(lvl.mags[lvl.front] - top) < 1e-6, 'the queue holds the largest magnitude still inside the line, at sample ' + k);
+				assert.ok(Math.abs(out) <= LV.ceiling * 1.000001, 'and no sample of it passes the ceiling, at sample ' + k);
+			}
+		}
+		/* one path to the ceiling: an envelope left beside it would be a second, slower claim about the same samples */
+		assert.ok(!levelSrc.includes('this.env'), 'nothing but the line itself bounds the wire');
+	}
+
 	assert.strictEqual(LV.levelHold(0.5, 0.9, LV.holdStep), 0.9,	/* a louder peak shows at once */);
 	assert.ok(Math.abs(LV.levelHold(0.5, 0.2, LV.holdStep) - 0.4925) < 1e-9);
 	assert.strictEqual(LV.levelHold(0.5, 1.4, LV.holdStep), 1);
