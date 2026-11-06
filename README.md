@@ -570,10 +570,11 @@ with a live SIM, OpenWrt 25.12.5, kernel 6.12.94, aarch64. Nothing is called wor
 through the actual hardware.
 
 **CPU and memory, 7 November 2026.** The daemon's own accounting read over a five-minute idle window and again across
-a 2:10 call with its recording: about **7.5 % of one core standing by** and **11 % in the call** — the call itself
-costs +3.3 % — with a **2.6 MB working set that did not move by a single kilobyte** across the idle window, the call,
-or a day of some thirty calls. The box's own load average sits at 0.02–0.14 with the line idle and rises to about 1.4
-while a call works through the kernel bridge's thread and the recording, falling back when the call ends.
+a 2:10 call with its stereo call recording: about **7.5 % of one core standing by** and **11 % in the call** — the
+call itself costs +3.3 % — with a **2.6 MB working set that did not move by a single kilobyte** across the idle
+window, the call, or a day of some thirty calls. The box's own load average sits at 0.02–0.14 with the line idle and
+rises to about 1.4 while a call works through the kernel bridge's thread and the stereo call recording, falling back
+when the call ends.
 
 **Nothing in the RJ11 socket, 6 November 2026.** The phone cable was unplugged from the AW1000 and the line left
 running. A call was dialled from the page's keypad and one was answered with the page's **Answer** button, both with
