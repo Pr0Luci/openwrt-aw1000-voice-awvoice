@@ -1769,8 +1769,15 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		if (modemq_qdai_head(text, head, sizeof(head)) && !p->qdai_head[0])
 			memcpy(p->qdai_head, head, sizeof(p->qdai_head));	/* the first field, written back as the modem prints it */
 		if (p->audio_slave == 0 && !p->audio_warned) {
+			/* master mode is not a fault the operator has to fix by hand: the write the HD exchange below owns
+			   carries the slave bit with the wanted rate, and the restart that follows is what applies it */
 			p->audio_warned = 1;
-			stamped(p->log, "  channel %u: warning: the modem is not in slave mode (AT+QDAI?): the voice path cannot work; it is not changed here\n", p->ch);
+			p->hd_want = 1;
+			p->hd_gave_up = 0;
+			p->hd_waiting = 0;
+			p->hd_asks = 0;
+			p->hd_stage = HD_IDLE;
+			stamped(p->log, "  channel %u: the modem is not in slave mode (AT+QDAI?): the slave write is owed once the line is quiet\n", p->ch);
 		}
 		/* the rate the modem puts on the bus is kept here for the status and for the exchange below. Nothing is
 		   decided from it: the question is read-only, and the answer may land after the handset was lifted -
@@ -3156,17 +3163,22 @@ int phone_step(struct phone *p, unsigned long long now)
 				stamped(p->log, "  channel %u: HD voice %s: the modem's PCM rate has not been read yet; the change waits for it\n",
 					p->ch, p->cfg.hd ? "on" : "off");
 			}
-		} else if (p->audio_rate == (p->cfg.hd ? 1 : 0)) {
+		} else if (p->audio_rate == (p->cfg.hd ? 1 : 0) && p->audio_slave != 0) {
 			/* the modem already keeps the wanted rate - it persists in the modem across its restarts - so
-			   there is nothing to ask and no data to drop: the line is what owes the bring-up */
+			   there is nothing to ask and no data to drop: the line is what owes the bring-up. A modem in
+			   master mode is asked anyway (the slave bit above is what makes the voice path work), which is
+			   why the rate matching alone is not enough to leave it alone */
 			p->hd_want = 0;
 			p->hd_layout_due = 1;
 			stamped(p->log, "  channel %u: the modem already answers %d kHz: the line is brought up at that rate\n",
 				p->ch, p->cfg.hd ? 16 : 8);
 		} else if (p->hd_asks < HD_ASK_MAX) {
 			p->hd_asks++;
-			stamped(p->log, "  channel %u: HD voice %s: the modem's PCM rate changes and the modem restarts (mobile data drops for about half a minute)\n",
-				p->ch, p->cfg.hd ? "on" : "off");
+			if (p->audio_slave == 0)
+				stamped(p->log, "  channel %u: the modem's PCM stays master: the slave write goes out and the modem restarts (mobile data drops for about half a minute)\n", p->ch);
+			else
+				stamped(p->log, "  channel %u: HD voice %s: the modem's PCM rate changes and the modem restarts (mobile data drops for about half a minute)\n",
+					p->ch, p->cfg.hd ? "on" : "off");
 			snprintf(cmd, sizeof(cmd), "AT+QDAI=%s,1,0,4,0,%d,1,1", p->qdai_head[0] ? p->qdai_head : "x", p->cfg.hd ? 1 : 0);
 			p->hd_stage = HD_QDAI_WRITE;
 			modem_cmd(p, cmd, p->ch, p->log);
@@ -3175,8 +3187,11 @@ int phone_step(struct phone *p, unsigned long long now)
 			   has, and the setting is taken up again by the next change or the next start */
 			p->hd_gave_up = 1;
 			p->hd_want = 0;
-			stamped(p->log, "  channel %u: the modem is left at %d kHz: HD voice waits for the next settings change\n",
-				p->ch, p->audio_rate == MQ_UNKNOWN ? 0 : (p->audio_rate ? 16 : 8));
+			if (p->audio_slave == 0)
+				stamped(p->log, "  channel %u: the modem keeps its PCM master mode: the voice path cannot work until the next settings change or service start\n", p->ch);
+			else
+				stamped(p->log, "  channel %u: the modem is left at %d kHz: HD voice waits for the next settings change\n",
+					p->ch, p->audio_rate == MQ_UNKNOWN ? 0 : (p->audio_rate ? 16 : 8));
 		}
 	}
 	t0 = clock_ms(c);

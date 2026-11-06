@@ -3027,7 +3027,7 @@ static void test_no_service(void)
 static void test_audio_check(void)
 {
 	struct rig r;
-	unsigned int k;
+	unsigned int writes;
 
 	rig_init(&r);
 	with_questions(&r);
@@ -3044,8 +3044,9 @@ static void test_audio_check(void)
 	run_ms(&r, 15000);
 	assert(status_of(&r).audio_slave == 0);
 	assert(count_in(log_text(&r), "not in slave mode") == 1);		/* said once per modem open, not at every round */
-	for (k = 0; k < r.act_count && k < ACTS_MAX; k++)
-		assert(strncmp(r.acts[k], "AT+QDAI=", 8));			/* never written */
+	writes = acts_starting(&r, "AT+QDAI=");
+	assert(writes >= 1 && writes <= 3);				/* the slave write goes out by itself, bounded */
+	assert(acts_of(&r, "AT+CFUN=1,1") >= writes);			/* each write is followed by the restart that applies it */
 	r.act_count = 0;
 	phone_modem_up(r.p);							/* the port came back: checked again, said again */
 	qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";
@@ -3162,6 +3163,33 @@ static void test_hd_layout_modem_refuses(void)
 	assert(count_in(log_text(&r), "the modem is left at") == 1);			/* said once */
 	assert(status_of(&r).line == PHONE_LINE_DIAL_TONE || status_of(&r).line == PHONE_LINE_IDLE);	/* the line was never taken down */
 	rig_close(&r);
+}
+
+/* a fresh flash ships the modem in PCM master mode, where the voice path cannot work: the daemon writes the slave bit
+ * itself (no settings change needed), restarts the modem for it, and stops asking when the readback says slave */
+static void test_master_mode_fixes_itself(void)
+{
+	struct rig r;
+	int want = -1;
+	unsigned int writes;
+
+	qdai_reply = "+QDAI: x,0,0,4,0,0,1,1\r\n\r\nOK\r\n";			/* as a fresh flash ships: master, at the wanted rate */
+	rig_init(&r);
+	with_questions(&r);
+	rig_open(&r);
+	run_ms(&r, 3000);
+	writes = acts_starting(&r, "AT+QDAI=");
+	assert(writes >= 1 && writes <= 3);					/* the slave write went out with no settings change at all, bounded */
+	assert(acts_of(&r, "AT+CFUN=1,1") >= writes);				/* each write is followed by the restart that applies it */
+	assert(count_in(log_text(&r), "the modem is not in slave mode") == 1);	/* said once, not every round */
+
+	qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";			/* the modem answers slave: the fix held */
+	run_ms(&r, 15000);
+	assert(status_of(&r).audio_slave == 1);
+	assert(acts_starting(&r, "AT+QDAI=") == writes);			/* nothing further is asked of a modem that holds the fix */
+	assert(phone_layout_due(r.p, &want) == 1 && want == 0);			/* the line is brought up at the rate it answers */
+	rig_close(&r);
+	qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";
 }
 
 /* 5. the call list is asked for every 250 ms while a call is being set up, while a hang-up sent from here is pending and for 2 s after an answer; every second otherwise */
@@ -3958,6 +3986,7 @@ int main(void)
 	test_hd_layout_already_confirmed();
 	test_hd_layout_waits_for_a_quiet_line();
 	test_hd_layout_modem_refuses();
+	test_master_mode_fixes_itself();
 	test_fast_call_list();
 	test_modem_setup();
 	test_ringback_option();
