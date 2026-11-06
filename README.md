@@ -28,8 +28,13 @@
 
 A kernel module drives the line chip over its register bus. One daemon serves the hook, the tones, ringing, caller id,
 the log, the recordings, the answering machine and quiet hours, and talks to the modem's AT port directly — no extra
-modem software in between. The LuCI page shows the state and every setting, and is a phone of its own: a call can be
-dialed and spoken from the browser with the handset sitting down.
+modem software in between. The LuCI page shows the state and every setting, and is a phone of its own.
+
+> [!IMPORTANT]
+> **The router is the phone.** Nothing has to be plugged into the RJ11 socket. Dialling, ringing, answering, hold and
+> swap, the three-way join, quiet hours, the answering machine and the recordings all work from the browser page, and a
+> call can go out and come in over a network phone on your own LAN instead. An analog handset is one more way to use the
+> same line — the way it was first built to be used — not something the system needs.
 
 **Three things worth knowing before you read further**
 
@@ -122,7 +127,7 @@ reboot
 > `build-info.txt` names the commit and the SDK these files came from; two runs of one commit produce identical
 > packages.
 
-### 2. Lift the handset
+### 2. Make a call
 
 At the next boot the service starts by itself: the board file is installed, the line is calibrated and ready, and the
 page is at **Services → AWvoice(RJ11)**. The line is **on** as installed — `awvoice.main.enabled` defaults to `1`, and
@@ -134,7 +139,13 @@ uci commit awvoice
 /etc/init.d/awvoice restart
 ```
 
-Dial a number. That is a working phone line.
+Dial a number. Either of these is a working phone line, and neither needs the other:
+
+- **with a handset on the line** — lift it and dial;
+- **with the RJ11 socket empty** — open **Services → AWvoice(RJ11)** and dial from the page's keypad. The page's
+  **Answer** button takes a call that comes in, and its **Hang up** ends it.
+
+A network phone on your own LAN is the third way, once the SIP tab is switched on.
 
 > [!TIP]
 > Nearly everything is also on the page, and saving there applies and reloads in one action. The shell route above is
@@ -349,6 +360,7 @@ than a dead line — the burst is cut and the reason is logged (`the chip's ring
 | calls | |
 | --- | --- |
 | Dial (tone), ring, answer, hang up | yes |
+| All of it with the RJ11 socket empty — the browser page is the handset | yes |
 | Hook-flash (R), call waiting with hold and swap | yes |
 | Three-way join — after a flash, `3`; switchable off in Settings | yes |
 | Hold recall — put the handset down while another call waits and the held call rings back | yes |
@@ -556,6 +568,14 @@ if a unit's chip did not come up the service stops with that cause in the log in
 The host suites below prove the logic on an ordinary computer. This section is the runs on the router itself — an AW1000
 with a live SIM, OpenWrt 25.12.5, kernel 6.12.94, aarch64. Nothing is called working here before a call has gone
 through the actual hardware.
+
+**Nothing in the RJ11 socket, 6 November 2026.** The phone cable was unplugged from the AW1000 and the line left
+running. A call was dialled from the page's keypad and one was answered with the page's **Answer** button, both with
+voice in each direction, and the same two directions were then run through a network phone on the LAN — the page and
+the network phone working beside each other on the same empty socket. The readings say why that works: the hook state
+comes from the chip's register, not from a handset's loop current, and the battery and loop-current samples in the
+bring-up and the ring are written to the log without deciding anything. The only place a loop current is judged is the
+line test, where a high reading is reported as a leak suspect.
 
 **HD voice (16 kHz), 2 November 2026**
 
