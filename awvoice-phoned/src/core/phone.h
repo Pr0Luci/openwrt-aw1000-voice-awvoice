@@ -143,11 +143,35 @@ struct phone_call_record {
 	enum phone_answered_by answered_by;	/* who answered the call (NONE when nobody did) */
 };
 
+/* The consumers that need the samples crossing: the daemon says which of them are alive, the core counts them as one
+ * reason to keep the audio path up (phone_audio_claim). They are the daemon's vocabulary, not the line's, so the core
+ * never decides what they mean - it only knows whether any of them is asking. */
+#define PHONE_AUDIO_RECORDER	0x01u	/* a call recording is open: its frames come off the bridge's tap */
+#define PHONE_AUDIO_MESSAGE	0x02u	/* the answering machine's message, or its greeting going out */
+#define PHONE_AUDIO_PAGE	0x04u	/* the page's own handset: its microphone and its playback */
+#define PHONE_AUDIO_FRONT_END	0x08u	/* the installed service's leg: the frames the front end exchanges */
+
+/* The audio path's own state, for the health reply and the log: whether it is running, whether anything needs it,
+ * who needs it, how long it has been up, how many times it was brought up and let down since the start, and why the
+ * last attempt to bring it up failed (0 = the last attempt worked). */
+struct phone_audio_view {
+	int up;
+	int wanted;
+	const char *reason;		/* the one fixed word for what is holding the path open, "idle" when nothing is */
+	unsigned int claims;
+	unsigned long long since_ms;
+	unsigned int starts;
+	unsigned int stops;
+	int last_error;
+};
+
 /* The front end's side. Every member is optional (NULL = not used). */
 struct phone_hooks {
 	void *ctx;
 	/* start the kernel audio bridge at these bit positions (AWFXS_BRIDGE_CROSS); 0 or -errno */
 	int (*bridge_start)(void *ctx, unsigned int modem_rx, unsigned int modem_tx, unsigned int line_rx, unsigned int line_tx, unsigned int flags);
+	/* stop it again: the thread goes away, the PCM block keeps running so the line chip keeps its clock; 0 or -errno */
+	int (*bridge_stop)(void *ctx);
 	/* the modem's audio level now: the peak magnitude of its samples in the last completed 100 ms window and the number of windows so far
 	 * (the kernel bridge's counters); 0 or -errno. Called from inside phone_step() at most every 100 ms, only while the measuring option is on. */
 	int (*modem_level)(void *ctx, unsigned int *peak, unsigned int *windows);
@@ -237,8 +261,10 @@ int phone_open(struct phone **out, struct chip *c, const struct board *b, const 
 
 /*
  * One step (every HOOK_POLL_MS): the event register, the hook, the dial pause, the modem client, the ring
- * supervision, the progress tones and the guard sample, in that order (see the stage tool's watch loop history ). 0, or a negative errno after which the line must be closed (three failed chip reads in a row,
- * a guard trip): the caller then calls phone_close() and stops (the daemon exits and is restarted).
+ * supervision, the progress tones, the guard sample and the audio path, in that order (see the stage tool's watch loop
+ * history; the audio path is decided last, when every state above has settled). 0, or a negative errno after which the
+ * line must be closed (three failed chip reads in a row, a guard trip): the caller then calls phone_close() and stops
+ * (the daemon exits and is restarted). An audio path that will not come up is never one of those errnos.
  */
 int phone_step(struct phone *p, unsigned long long now);
 
@@ -257,6 +283,34 @@ int phone_hd_active(const struct phone *p);
  * answer, so a bring-up that failed is owed again at the next read rather than remembered as done.
  */
 int phone_layout_due(struct phone *p, int *want);
+
+/*
+ * The audio path's life. The bridge crosses the modem's samples and the line chip's, so it is only worth running
+ * while something is exchanging them: a call the modem lists, a call the line is holding, or a consumer the daemon
+ * says is alive (PHONE_AUDIO_* below). A lifted handset with nothing behind it is dial tone and digits - the chip
+ * makes the tones, the modem queue carries the digits - and crossing silence costs the same work as crossing speech.
+ *
+ * The path comes up at the bring-up (phone_open) so a layout that cannot cross samples is said there, in the same
+ * failure the service has always died on, and goes down once nothing needs it for AUDIO_GRACE_MS. The grace is what
+ * makes this safe rather than clever: a hook flash, a call list that is catching up, a held call coming back and a
+ * second call taking over all leave the line for a moment or two, and a restart in the middle of one of those is an
+ * audio gap a person hears. The PCM block is never brought down - the line chip is its slave and needs the clock.
+ *
+ * phone_audio_claim says a consumer is alive or has gone. phone_audio_apply makes the decision now rather than at the
+ * next step: whoever is about to arm a tap or a playback needs the path under it, and a refusal must reach that
+ * caller instead of arriving as an errno from the device. 0 when the path is up as far as this call can tell, a
+ * negative errno while it cannot be brought up (it is tried again every AUDIO_RETRY_MS, and said in the log).
+ * A step that cannot bring the audio path up is not a failed step: the line keeps working and the health reply says
+ * the path is wanted but not running.
+ *
+ * phone_audio_apply is the one core function a hook callback may call. It reads no line state and changes no line
+ * state: a consumer that is about to arm itself against the bridge (a recording, a greeting, the page) uses it to
+ * bring the samples crossing up under its own arm, which the step's own decision would otherwise only have done a
+ * tick later - and a sink armed against a stopped bridge is refused by the module, not queued.
+ */
+void phone_audio_claim(struct phone *p, unsigned int bit, int on);
+int phone_audio_apply(struct phone *p, unsigned long long now);
+void phone_audio_view_of(const struct phone *p, struct phone_audio_view *v);
 
 /* End the current call or call attempt (AT+CHUP through the modem queue). 0, -ENOENT when there is none. */
 int phone_hangup(struct phone *p);

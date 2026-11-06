@@ -178,6 +178,16 @@ struct phone {
 	int hot_armed;			/* the hotline may fire in this stretch of dial tone (a digit, a hang-up or a call ends it) */
 	unsigned long long hot_since_ms;	/* the dial tone began (again) at this time */
 	int audio_warned;		/* the "not in slave mode" warning went out for this modem setup */
+	/* the audio path (src/core/phone.h, phone_audio_apply): the bridge is up while a leg, a call this line holds,
+	 * or a consumer the daemon claimed needs the samples crossing, and for AUDIO_GRACE_MS after the last of them went */
+	int audio_up;			/* the bridge was started and has not been stopped since */
+	unsigned int audio_claims;	/* PHONE_AUDIO_* bits: which consumers the daemon says are alive */
+	unsigned long long audio_need_ms;	/* when something last needed the path (0 = nothing has ever needed it since the stop) */
+	unsigned long long audio_up_ms;	/* when the path last came up */
+	unsigned long long audio_retry_ms;	/* while the time is below this, neither a start nor a stop is tried again */
+	unsigned int audio_starts, audio_stops, audio_fails;
+	int audio_error;		/* why the last attempt failed (0 = the last attempt worked) */
+	int audio_error_said;		/* that failure has been said in the log, and nothing has changed since */
 	int clvl_pending;		/* the earpiece level waits for the modem's range (asked once per setup) */
 	int key_drop_logged;		/* a key found the queue full in this call: said once */
 	unsigned long long level_ms;	/* the last reading of the modem's audio level (measuring option) */
@@ -2764,7 +2774,7 @@ int phone_open(struct phone **out, struct chip *c, const struct board *b, const 
 	unsigned int ch = cfg->channel;
 	struct phone *p = NULL;
 	struct wideband wb;
-	int err, leave, fed = 0, det_on = 0, ring_ok = 0;
+	int err, leave, fed = 0, det_on = 0, ring_ok = 0, bridge_up = 0;
 
 	memset(&wb, 0, sizeof(wb));
 
@@ -2807,6 +2817,9 @@ int phone_open(struct phone **out, struct chip *c, const struct board *b, const 
 		if (err) {
 			fprintf(log, "  FAILED on channel %u: bridge start (%d)\n", ch, err);
 		} else {
+			bridge_up = 1;	/* the bring-up keeps the path up: a layout that cannot cross samples is said here,
+					 * at the same moment it has always been said, and the watch lets it down when the
+					 * line turns out to be quiet (phone_audio_apply) */
 			fprintf(log, "  bridge cross: modem %u/%u, line %u/%u (bit positions)\n",
 				BRIDGE_MODEM_RX, BRIDGE_MODEM_TX, BRIDGE_LINE_RX, BRIDGE_LINE_TX);
 		}
@@ -2827,12 +2840,17 @@ int phone_open(struct phone **out, struct chip *c, const struct board *b, const 
 			p->det_on = det_on;
 			p->wb = wb;		/* the wideband state was applied before the phone existed: it moves into it here */
 			p->hd_inforce = cfg->hd ? 1 : 0;	/* the layout the hardware was actually brought up with, whatever the settings wish */
+			p->audio_up = bridge_up;
+			p->audio_starts = bridge_up;
+			p->audio_need_ms = p->audio_up_ms = c->ops->now_ms(c->ctx);
 		}
 	}
 	if (!err) {
 		*out = p;
 		return 0;
 	}
+	if (bridge_up && hooks->bridge_stop)		/* a bring-up that died halfway must not leave the samples crossing for nobody */
+		(void)hooks->bridge_stop(hooks->ctx);
 	if (fed && det_on) {
 		int d_err = dtmf_disable(c, ch, log);
 
@@ -2948,6 +2966,134 @@ static void alarm_check(struct phone *p, unsigned long long now)
 	case ALARM_QUIET:
 		break;
 	}
+}
+
+/*
+ * The audio path's life, in one place. The bridge crosses the modem's samples and the line chip's, so it is work
+ * worth doing while something exchanges them and noise when nothing does: a lifted handset with nothing behind it is
+ * dial tone and digits, which the chip makes and the modem queue carries. The reason comes back as one fixed word
+ * because the log and the health reply must say which of them is holding the path open, and a stranger reading the
+ * page must be able to tell "the line is quiet" from "the audio path is broken".
+ */
+static const char *audio_reason(const struct phone *p)
+{
+	if (p->audio_claims & PHONE_AUDIO_RECORDER)
+		return "recording";
+	if (p->audio_claims & PHONE_AUDIO_MESSAGE)
+		return "message";
+	if (p->audio_claims & PHONE_AUDIO_PAGE)
+		return "page";
+	if (p->audio_claims & PHONE_AUDIO_FRONT_END)
+		return "front end";
+	if (p->machine_call || p->machine_answering)
+		return "machine's call";
+	if (p->fe_call || p->fe_answering || p->fe_dial)
+		return "front end";
+	if (p->nlegs || p->wait.open || p->recall)	/* the modem lists a call: active, held, dialling, alerting, incoming or waiting */
+		return "call";
+	if (p->call_id || p->incoming)		/* the line holds a call the list has not caught up with, or one is being offered */
+		return "call";
+	return NULL;
+}
+
+/*
+ * Bring the path up while a reason exists, and let it down AUDIO_GRACE_MS after the last one went. The grace is what
+ * makes this safe rather than clever: a hook flash, a call list catching up, a held call coming back and a second
+ * call taking over all leave the line for a moment or two, and a restart inside one of those is a gap a person
+ * hears. A start that fails is tried again after AUDIO_RETRY_MS and said once - it never fails the step, because the
+ * handset, the tones, the digits and the call control all work with the crossing down.
+ */
+static void audio_update(struct phone *p, unsigned long long now)
+{
+	const char *why = audio_reason(p);
+	int err;
+
+	if (!p->hooks.bridge_start)
+		return;				/* this front end has no audio device to manage (the stage tool installs no bridge) */
+	if (why) {
+		p->audio_need_ms = now;
+		if (p->audio_up || now < p->audio_retry_ms)
+			return;
+		err = p->hooks.bridge_start(p->hooks.ctx, BRIDGE_MODEM_RX, BRIDGE_MODEM_TX, BRIDGE_LINE_RX, BRIDGE_LINE_TX,
+			p->hd_inforce ? PHONE_BRIDGE_WIDEBAND : 0);
+		if (err) {
+			p->audio_retry_ms = now + AUDIO_RETRY_MS;
+			p->audio_error = err;
+			p->audio_fails++;
+			if (!p->audio_error_said) {
+				p->audio_error_said = 1;
+				stamped(p->log, "  channel %u: the audio path did not come up for the %s (%d): it is tried again\n",
+					p->ch, why, err);
+			}
+			return;
+		}
+		p->audio_up = 1;
+		p->audio_starts++;
+		p->audio_up_ms = now;
+		p->audio_retry_ms = 0;
+		if (p->audio_error) {
+			stamped(p->log, "  channel %u: the audio path came up for the %s after %u failed tries\n",
+				p->ch, why, p->audio_fails + 1);
+			p->audio_error = 0;
+			p->audio_fails = 0;
+		}
+		p->audio_error_said = 0;
+		stamped(p->log, "  channel %u: the audio path is up for the %s\n", p->ch, why);
+		return;
+	}
+	if (!p->audio_up || now < p->audio_need_ms + AUDIO_GRACE_MS || now < p->audio_retry_ms)
+		return;
+	if (!p->hooks.bridge_stop)
+		return;				/* the front end cannot stop what it has no way to stop: the path stays as it was */
+	err = p->hooks.bridge_stop(p->hooks.ctx);
+	if (err) {
+		p->audio_retry_ms = now + AUDIO_RETRY_MS;
+		p->audio_error = err;
+		p->audio_fails++;
+		if (!p->audio_error_said) {
+			p->audio_error_said = 1;
+			stamped(p->log, "  channel %u: the audio path did not stand by (%d): it is tried again\n", p->ch, err);
+		}
+		return;
+	}
+	p->audio_up = 0;
+	p->audio_stops++;
+	p->audio_retry_ms = 0;
+	p->audio_error = 0;
+	p->audio_error_said = 0;
+	stamped(p->log, "  channel %u: the audio path stands by: nothing needs the samples (%llu s up)\n",
+		p->ch, (now > p->audio_up_ms ? now - p->audio_up_ms : 0) / 1000);
+}
+
+void phone_audio_claim(struct phone *p, unsigned int bit, int on)
+{
+	if (on)
+		p->audio_claims |= bit;
+	else
+		p->audio_claims &= ~bit;
+}
+
+int phone_audio_apply(struct phone *p, unsigned long long now)
+{
+	audio_update(p, now);
+	if (!audio_reason(p) || !p->hooks.bridge_start)
+		return 0;
+	return p->audio_up ? 0 : (p->audio_error ? p->audio_error : -EAGAIN);
+}
+
+void phone_audio_view_of(const struct phone *p, struct phone_audio_view *v)
+{
+	const char *why = audio_reason(p);
+
+	memset(v, 0, sizeof(*v));
+	v->reason = why ? why : "idle";
+	v->up = p->audio_up;
+	v->wanted = why != NULL;
+	v->claims = p->audio_claims;
+	v->since_ms = p->audio_up && p->step_ms >= p->audio_up_ms ? p->step_ms - p->audio_up_ms : 0;
+	v->starts = p->audio_starts;
+	v->stops = p->audio_stops;
+	v->last_error = p->audio_error;
 }
 
 int phone_step(struct phone *p, unsigned long long now)
@@ -3068,6 +3214,9 @@ int phone_step(struct phone *p, unsigned long long now)
 		p->next_sample_ms = now + GUARD_MS;
 		task_done(c, p, "sample", t0);
 	}
+	if (!err)
+		audio_update(p, now);		/* last, after every state above settled: the audio follows what the line is
+						 * really doing, and a path that cannot come up never fails the step */
 	return err;
 }
 
@@ -3079,6 +3228,17 @@ int phone_close(struct phone *p, int err)
 	int det_on = p->det_on, leave;
 
 	err = phone_watch_end(p, err);
+	if (p->audio_up && p->hooks.bridge_stop) {
+		/* whoever brought the samples crossing up brings them down again: the thread does not outlive the line it
+		 * was started for, so a bring-up at another layout never finds one already running */
+		int b_err = p->hooks.bridge_stop(p->hooks.ctx);
+
+		p->audio_up = 0;
+		p->audio_stops++;
+		fprintf(log, "  channel %u: the audio path is stopped with the line\n", ch);
+		if (b_err && !err)
+			err = b_err;
+	}
 	if (det_on) {
 		int d_err = dtmf_disable(c, ch, log);
 

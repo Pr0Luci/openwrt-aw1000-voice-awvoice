@@ -227,6 +227,12 @@ static const struct { uint16_t ram; uint8_t word; } dc_feed_word[DC_FEED_WORDS] 
  */
 #define READ_FAIL_MAX		3		/* chip reads of the watch (hook, events) that may fail in a row before the hold stops */
 #define TONE_RETRY_MS		250		/* a tone that could not be started or stopped is tried again after this long */
+#define AUDIO_GRACE_MS		3000		/* the audio path stays up this long after the last thing that needed it went: a hook
+						 * flash, a call list catching up, a held call coming back and a second call taking over
+						 * all leave the line for a moment or two, and a restart in one of those is a gap a
+						 * person hears (src/core/phone.h, phone_audio_apply) */
+#define AUDIO_RETRY_MS		100		/* an audio path that could not be brought up is tried again after this long (the same
+						 * shape as TONE_RETRY_MS: the try is cheap, the log line is not repeated) */
 #define HOOK_GAP_LOG_MS		20
 #define HOOK_GAP_LOG_MAX	20		/* gap lines logged per run; the end-of-run summary counts them all */
 

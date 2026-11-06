@@ -114,15 +114,16 @@ return baseclass.extend({
 		var resolve = null;
 
 		function beginAudio() {
-			/* the browser's own gain control is asked off and echo/noise handling kept: on a live call the gain
-			   control lifted a minus 20 dBFS test tone to minus 0.2 dBFS, and the send level belongs to
-			   audio-level.js, which holds the wire under minus 3 dBFS instead */
+			/* every piece of the browser's own handling is asked off: its gain control lifted a minus 20 dBFS test tone
+			   to minus 0.2 dBFS on a live call, and its echo and noise handling leaves speech sounding processed on
+			   this path - the line side has no such handling and is clear beside it. The send level belongs to
+			   audio-level.js, which holds the wire under minus 3 dBFS instead. The price of no echo handling is this
+			   side's own loudspeaker reaching the microphone when it is loud, which a headset does not have. */
 			return navigator.mediaDevices.getUserMedia({ audio: {
-				echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1
+				echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1
 			} }).then(function(s) {
 				stream = s;
-				/* the engine's own rate is kept: the worklet resamples when it is not 8000, so the browser's echoing
-				 * and noise handling of the chosen microphone stay in charge */
+				/* the engine's own rate is kept: the worklet resamples when it is not 8000 */
 				ctx = new window.AudioContext();
 				return ctx.audioWorklet.addModule(L.resource('view/awvoice/phone/audio-level.js'));
 			}).then(function() {

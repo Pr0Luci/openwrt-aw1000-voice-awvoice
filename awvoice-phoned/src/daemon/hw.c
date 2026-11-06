@@ -124,15 +124,22 @@ int dev_bridge_start(void *ctx, unsigned int modem_rx, unsigned int modem_tx, un
 	int err = dev_bridge(ctx, &b);
 
 	if (err == -EBUSY) {
-		/* a bridge is already running (an HD switch changed its flags): stop it and start again */
-		b.mode = AWFXS_BRIDGE_OFF;
-		if (dev_bridge(ctx, &b))
+		/* one is already running: the core stops the path it started, so this is a bring-up that found the
+		 * earlier one still crossing (a line brought up again without the core's phone_close in between) */
+		if (dev_bridge_stop(ctx))
 			return -EIO;
 		b = (struct awfxs_bridge){ .mode = AWFXS_BRIDGE_CROSS,
 			.modem_rx = modem_rx, .modem_tx = modem_tx, .line_rx = line_rx, .line_tx = line_tx, .flags = flags };
 		err = dev_bridge(ctx, &b);
 	}
 	return err;
+}
+
+int dev_bridge_stop(void *ctx)
+{
+	struct awfxs_bridge b = { .mode = AWFXS_BRIDGE_OFF };
+
+	return dev_bridge(ctx, &b);
 }
 
 int dev_bridge_stats(void *ctx, void *out)

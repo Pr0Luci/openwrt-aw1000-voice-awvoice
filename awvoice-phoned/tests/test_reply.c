@@ -293,7 +293,7 @@ static void test_health(void)
 		"{\"atPort\":{\"port\":\"/dev/ttyUSB2\",\"usbInterface\":2,\"responding\":true,\"lastReplyAgoSec\":7,\"portOwner\":\"free\"},"
 		"\"line\":{\"channel\":1,\"numbering\":\"\",\"hook\":\"on\",\"state\":\"idle\",\"calibrated\":true,\"batteryMv\":59111,\"loopUa\":-903},"
 		"\"modem\":{\"simReady\":null,\"registered\":null,\"imsRegistered\":null,\"rsrpDbm\":null,\"network\":null,\"operator\":null,\"operatorName\":null,\"audioSlave\":null,\"hdVoice\":\"off\",\"audioRate\":null,\"voiceLayout\":8000,\"callWaiting\":null,\"clir\":null,\"clirStatus\":null},"
-		"\"system\":{\"moduleLoaded\":true,\"bridge\":{\"running\":null,\"frames\":null,\"resyncs\":null,\"txSkipped\":null,\"maxGapUs\":null}},"
+		"\"system\":{\"moduleLoaded\":true,\"bridge\":{\"running\":null,\"frames\":null,\"resyncs\":null,\"txSkipped\":null,\"maxGapUs\":null},\"audioPath\":{\"running\":null,\"wanted\":null,\"why\":null,\"claims\":null,\"upMs\":null,\"starts\":null,\"stops\":null,\"lastError\":null}},"
 		"\"indicator\":{\"led\":null,\"state\":\"off\",\"leds\":null},"
 		"\"counters\":{\"modemTimeouts\":2,\"hookGapsOver20ms\":1,\"hookGapMaxMs\":31,\"faults\":4},"
 		"\"machine\":{\"greetingLoaded\":false,\"greetingMs\":0,\"greetingError\":\"\",\"delaySec\":0},"

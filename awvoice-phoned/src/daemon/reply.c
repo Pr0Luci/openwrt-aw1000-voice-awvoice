@@ -228,6 +228,38 @@ void reply_health(const struct reply_sink *o, const struct phone_status *st, con
 		o->null(o->ctx, "maxGapUs");
 	}
 	o->close(o->ctx);
+	/* the audio path's own answer, apart from the counters: "the line is quiet, nothing is crossing" and "the
+	   path should be running and is not" are different faults, and the page must be able to tell them apart
+	   without a shell (src/core/phone.h, phone_audio_apply) */
+	o->open(o->ctx, "audioPath", 0);
+	if (info->audio_ok) {
+		o->flag(o->ctx, "running", info->audio_up != 0);
+		o->flag(o->ctx, "wanted", info->audio_wanted != 0);
+		o->text(o->ctx, "why", info->audio_reason ? info->audio_reason : "idle");
+		o->open(o->ctx, "claims", 0);
+		o->flag(o->ctx, "recorder", (info->audio_claims & PHONE_AUDIO_RECORDER) != 0);
+		o->flag(o->ctx, "message", (info->audio_claims & PHONE_AUDIO_MESSAGE) != 0);
+		o->flag(o->ctx, "page", (info->audio_claims & PHONE_AUDIO_PAGE) != 0);
+		o->flag(o->ctx, "frontEnd", (info->audio_claims & PHONE_AUDIO_FRONT_END) != 0);
+		o->close(o->ctx);
+		o->number(o->ctx, "upMs", (long long)info->audio_up_ms);
+		o->number(o->ctx, "starts", info->audio_starts);
+		o->number(o->ctx, "stops", info->audio_stops);
+		if (info->audio_error)
+			o->text(o->ctx, "lastError", strerror(-info->audio_error));
+		else
+			o->null(o->ctx, "lastError");
+	} else {
+		o->null(o->ctx, "running");
+		o->null(o->ctx, "wanted");
+		o->null(o->ctx, "why");
+		o->null(o->ctx, "claims");
+		o->null(o->ctx, "upMs");
+		o->null(o->ctx, "starts");
+		o->null(o->ctx, "stops");
+		o->null(o->ctx, "lastError");
+	}
+	o->close(o->ctx);
 	o->close(o->ctx);
 
 	o->open(o->ctx, "indicator", 0);
