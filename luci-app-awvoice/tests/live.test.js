@@ -1420,6 +1420,8 @@ async function main() {
 	assert.ok(webSrc.includes('* 0.985'), 'the bar decays with the step audio-level.js names');
 	assert.ok(workletSrc.includes('new AwvoiceLevel(sampleRate)'), 'the capture levels before it decimates');
 	assert.ok(audioSrc.includes('autoGainControl: false'), 'the browser is not handed the send level');
+	assert.ok(audioSrc.includes('echoCancellation: false'), 'and neither does its echo handling process the speech');
+	assert.ok(audioSrc.includes('noiseSuppression: false'), 'nor its noise handling');
 	assert.ok(audioSrc.includes("addModule(L.resource('view/awvoice/phone/audio-level.js'))"),
 		'the level file is loaded into the worklet before the processors');
 
