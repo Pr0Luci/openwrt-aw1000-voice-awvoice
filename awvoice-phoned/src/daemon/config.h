@@ -42,7 +42,7 @@
  *   machine_path      /etc/awvoice/messages      a directory                        where the messages land; a mount can be named for more room; never the recordings' folder, and a /mnt folder is used only once its drive is mounted
  *   machine_max_mb    50                         1..4095                            the messages directory's budget (the call recordings have their own)
  *   machine_max_s     120                        10..600 s                          the longest message; the call is ended when it is reached
- *   web_port          7443                       1024..65535                        the page's browser-audio listener (WSS, LAN address only); opened only while the SIP mode runs
+ *   web_port          7443                       1024..65535                        the page's browser-audio listener (WSS, LAN address only); opened while the line is up, whichever side the SIP mode names
  *   web_cert          /etc/uhttpd.crt            a readable PEM file                the certificate of that listener; the router's own HTTPS certificate by default
  *   web_key           /etc/uhttpd.key            a readable PEM key                 its private key
  *
