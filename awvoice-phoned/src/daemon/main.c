@@ -2440,6 +2440,7 @@ static void layout_rebuild(struct daemon *dm, int want)
 		return;
 	}
 	dm->tap_wideband = dm->hd_layout;		/* until the tap is armed and read again, this is the layout it will report */
+	dm->audio_stops = 0;			/* the counters belong to the new line now: the old ones would read as a stop the daemon never saw */
 	dm->api.phone = dm->phone;
 	dm->api.hd = dm->cfg.hd ? (phone_hd_active(dm->phone) ? 2 : 1) : 0;
 	dm->api.layout = dm->hd_layout;
