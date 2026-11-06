@@ -238,7 +238,13 @@ struct phone_status {
 	int clir_status;			/* AT+CLIR? provisioning: 0..4 (see modemq.h) or PHONE_UNKNOWN */
 	char network[24];			/* the access technology for display ("4G", "5G", ...), "" when unknown */
 	char mcc[4];				/* the network the line is registered on: three digits (ITU-T E.212), "" until it is read; the numbering plan follows it when `region` is auto */
+	char mnc[4];				/* the digits after the country code of that PLMN ("" until +QNWINFO gives it) */
 	char netname[24];			/* what the modem calls its network, where it answers with a name instead of the digits ("" until it does) */
+	char spn[24];				/* the service provider name (AT+QSPN), where that answers and the others give nothing ("" until then) */
+	char serving_mode[12];			/* the serving cell's domain from AT+QENG="servingcell" ("LTE", "NR5G-SA", "NR5G-NSA", ...), "" when unknown */
+	char serving_state[10];			/* its UE state word ("SEARCH", "LIMSRV", "NOCONN", "CONNECT"), "" when unknown */
+	char serving_band[12];			/* its band as the modem prints it, "" when unknown */
+	int serving_rsrp;			/* its reference signal power in dBm, or PHONE_DBM_UNKNOWN */
 	unsigned int modem_timeouts;		/* modem requests that got no reply in time, since the start */
 	unsigned long long modem_reply_ms;	/* the clock time of the modem's last reply (0 = none yet) */
 	unsigned int faults;			/* failed chip reads and guard trips since the start */

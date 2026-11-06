@@ -54,6 +54,26 @@ int modemq_clir(const char *reply, int *status);
 int modemq_ccwa(const char *reply);
 /* the reference signal power in dBm (the second value of the LTE and 5G forms), MQ_UNKNOWN when there is none */
 int modemq_rsrp_dbm(const char *reply);
+
+/*
+ * The serving cell as AT+QENG="servingcell" answers it (the manual's three shapes this port cares about: NR5G-SA,
+ * NR5G-NSA, LTE; GSM/WCDMA set the mode word and nothing else). `mode` is the network domain for display ("LTE",
+ * "NR5G-SA", "NR5G-NSA"), `state` the UE state word ("SEARCH", "LIMSRV", "NOCONN", "CONNECT"), `band` the band as
+ * the modem prints it, `mcc`/`mnc` the PLMN when the answer carries it, `rsrp` the serving cell's reference power in
+ * dBm (MQ_UNKNOWN when the answer holds none). 0 when a row was read, 1 when the reply holds no row of this kind.
+ */
+struct modemq_cell {
+	char state[10];
+	char mode[12];
+	char band[12];
+	char mcc[4];
+	char mnc[4];
+	int rsrp;
+};
+int modemq_servingcell(const char *reply, struct modemq_cell *cell);
+
+/* the service provider name (AT+QSPN, the first quoted string of the answer): copied without the quotes; 0 when the reply names nothing */
+int modemq_spn(const char *reply, char *name, size_t cap);
 /* the access technology for display ("2G", "3G", "4G", "5G"; "" when unknown) and the band text of the reply ("LTE BAND 3"; "" when none) */
 void modemq_network(const char *reply, char *network, size_t ncap, char *band, size_t bcap);
 /*

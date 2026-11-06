@@ -81,6 +81,8 @@ static void ago_s(const struct reply_sink *o, const char *name, unsigned long lo
 
 static void network(const struct reply_sink *o, const struct phone_status *st)
 {
+	const char *name = st->netname[0] ? st->netname : st->spn;
+
 	if (st->network[0])
 		o->text(o->ctx, "network", st->network);
 	else
@@ -91,10 +93,30 @@ static void network(const struct reply_sink *o, const struct phone_status *st)
 		o->text(o->ctx, "operator", st->mcc);
 	else
 		o->null(o->ctx, "operator");
-	if (st->netname[0])
-		o->text(o->ctx, "operatorName", st->netname);
+	/* the name, from whichever read answered with one: the standard read's own name, then the service provider's */
+	if (name[0])
+		o->text(o->ctx, "operatorName", name);
 	else
 		o->null(o->ctx, "operatorName");
+	if (st->mnc[0])
+		o->text(o->ctx, "operatorMnc", st->mnc);
+	else
+		o->null(o->ctx, "operatorMnc");
+	/* the serving cell (AT+QENG="servingcell"): the domain word separates 5G SA from NSA, which the access-technology
+	 * word above cannot, and its reference power is the one of the cell the modem actually camps on */
+	if (st->serving_mode[0])
+		o->text(o->ctx, "netMode", st->serving_mode);
+	else
+		o->null(o->ctx, "netMode");
+	/* the serving cell's own answer is the validity flag: without it every number here would be somebody's guess */
+	if (st->serving_mode[0] && st->serving_rsrp != PHONE_DBM_UNKNOWN)
+		o->number(o->ctx, "servingRsrp", st->serving_rsrp);
+	else
+		o->null(o->ctx, "servingRsrp");
+	if (st->serving_mode[0] && st->serving_band[0])
+		o->text(o->ctx, "servingBand", st->serving_band);
+	else
+		o->null(o->ctx, "servingBand");
 }
 
 void reply_status(const struct reply_sink *o, const struct phone_status *st, const struct reply_info *info, unsigned long long now_ms)

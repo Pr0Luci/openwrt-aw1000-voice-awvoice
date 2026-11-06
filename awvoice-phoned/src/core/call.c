@@ -199,6 +199,9 @@ struct phone {
 	int mcc_warned;			/* the modem named its network in text instead of digits: said once per registration */
 	int mcc_named;			/* a reply carried a name where the digits were asked for */
 	char netname[MQ_NETWORK_MAX];	/* the name the modem gives for its network, where it gives a name at all (the page and the log show it) */
+	char mnc[MQ_MCC_MAX];		/* the digits after the country code in the PLMN the modem camps on ("" until +QNWINFO gives it) */
+	char spn[24];			/* the service provider name (AT+QSPN), kept beside the network's own name for the page */
+	struct modemq_cell cell;	/* the serving cell as AT+QENG="servingcell" last answered it ("" / MQ_UNKNOWN until then) */
 	/* the watch's own timing record: the hook must be read every few ms whatever else the loop does */
 	unsigned long long hook_at_ms;	/* the clock time of the last hook read */
 	unsigned long long slow_ms;	/* the slowest task since the last hook read ... */
@@ -1813,7 +1816,7 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		if (n != MQ_UNKNOWN)
 			p->clir_status = status;
 	} else if (!strcmp(cmd, "AT+QNWINFO")) {
-		char net[MQ_NETWORK_MAX], band[MQ_NETWORK_MAX], mcc[MQ_MCC_MAX];
+		char net[MQ_NETWORK_MAX], band[MQ_NETWORK_MAX], mcc[MQ_MCC_MAX], raw[MQ_NETWORK_MAX];
 
 		modemq_network(text, net, sizeof(net), band, sizeof(band));
 		if (net[0]) {
@@ -1822,8 +1825,9 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		}
 		/* the same network in the modem's own query, where this one carries the PLMN as digits; it says nothing
 		 * when the standard +COPS? read already gave them */
-		if (modemq_operator(text, "+QNWINFO:", 1, mcc, sizeof(mcc), NULL, 0) == 1) {
+		if (modemq_operator(text, "+QNWINFO:", 1, mcc, sizeof(mcc), raw, sizeof(raw)) == 1) {
 			memcpy(p->mcc, mcc, sizeof(mcc));
+			snprintf(p->mnc, sizeof(p->mnc), "%s", raw[0] ? raw + 3 : "");	/* the digits after the country code ("41302" -> "02") */
 			p->mcc_named = 0;
 			p->mcc_warned = 0;
 		} else if (!p->mcc[0] && p->mcc_named && !p->mcc_warned) {
@@ -1831,6 +1835,22 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 			stamped(p->log, "  channel %u: the modem names its network '%s': no digits to choose a numbering plan from\n",
 				p->ch, p->netname);
 		}
+	} else if (!strcmp(cmd, "AT+QENG=\"servingcell\"")) {
+		struct modemq_cell now_cell;
+
+		/* a snapshot, not a kept fact: the newest complete answer is what the radio is on now. The line carries the
+		 * domain word alone — the log never carries a number, and the digits of the cell live in the health reply */
+		if (modemq_servingcell(text, &now_cell) == 0) {
+			if (strcmp(now_cell.mode, p->cell.mode))
+				stamped(p->log, "  channel %u: the serving cell moves to %s (%s)\n", p->ch, now_cell.mode, now_cell.state);
+			p->cell = now_cell;
+		}
+	} else if (!strcmp(cmd, "AT+QSPN")) {
+		char name[sizeof(p->spn)];
+
+		/* the service provider name is the third way of naming a network: it fills in where the standard reads gave nothing */
+		if (modemq_spn(text, name, sizeof(name)) && name[0])
+			snprintf(p->spn, sizeof(p->spn), "%s", name);
 	} else if (!strcmp(cmd, "AT+COPS?")) {
 		char mcc[MQ_MCC_MAX], name[MQ_NETWORK_MAX];
 		int verdict = modemq_operator(text, "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name));
@@ -2746,6 +2766,9 @@ struct phone *phone_attach(struct chip *c, unsigned int ch, const struct board *
 	p->next_sample_ms = now + GUARD_MS;
 	p->poll_due_ms = now;
 	p->sim_ready = p->registered = p->ims = p->rsrp_dbm = p->audio_slave = p->audio_rate = p->clir = p->clir_status = p->ccwa_net = MQ_UNKNOWN;
+	memset(&p->cell, 0, sizeof(p->cell));
+	p->cell.rsrp = MQ_UNKNOWN;
+	p->mnc[0] = p->spn[0] = 0;
 	p->fwd_want = p->cfg.forward.configured;
 	modem_setup(p, now);			/* the service's modem setup (volatile settings of the modem) */
 	return p;
@@ -3457,7 +3480,13 @@ void phone_status(const struct phone *p, struct phone_status *st)
 	st->clir_status = p->clir_status == MQ_UNKNOWN ? PHONE_UNKNOWN : p->clir_status;
 	snprintf(st->network, sizeof(st->network), "%s", p->network);
 	snprintf(st->mcc, sizeof(st->mcc), "%s", p->mcc);
+	snprintf(st->mnc, sizeof(st->mnc), "%s", p->mnc);
 	snprintf(st->netname, sizeof(st->netname), "%s", p->netname);
+	snprintf(st->spn, sizeof(st->spn), "%s", p->spn);
+	snprintf(st->serving_mode, sizeof(st->serving_mode), "%s", p->cell.mode);
+	snprintf(st->serving_state, sizeof(st->serving_state), "%s", p->cell.state);
+	snprintf(st->serving_band, sizeof(st->serving_band), "%s", p->cell.band);
+	st->serving_rsrp = p->cell.rsrp == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->cell.rsrp;
 	st->modem_timeouts = p->modem_timeouts;
 	st->modem_reply_ms = p->modem_reply_ms;
 	st->faults = p->faults;

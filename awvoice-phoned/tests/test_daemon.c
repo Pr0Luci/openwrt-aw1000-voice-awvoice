@@ -1813,6 +1813,7 @@ static void test_blocking_calls(void)
 	run_ms(&r, 3000);
 	assert(acts_of(&r, "ATD45;") == 0 && status_of(&r).line == PHONE_LINE_RELEASE && status_of(&r).call_id == 0);
 	assert(r.rec_count == 1 && r.rec[0].dir == PHONE_DIR_OUT && r.rec[0].result == PHONE_RES_BLOCKED && !strcmp(r.rec[0].number, "45"));
+	fprintf(stderr, "DEBUG count=%u strstr45=%d\n", count_in(log_text(&r), "a blocked number was dialled"), strstr(log_text(&r), "45") != NULL);
 	assert(count_in(log_text(&r), "a blocked number was dialled") == 1 && !strstr(log_text(&r), "45"));
 	handset(&r, 0);
 	run_ms(&r, 1500);
@@ -3184,7 +3185,7 @@ static void test_master_mode_fixes_itself(void)
 	assert(count_in(log_text(&r), "the modem is not in slave mode") == 1);	/* said once, not every round */
 
 	qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";			/* the modem answers slave: the fix held */
-	run_ms(&r, 15000);
+	run_ms(&r, full_cycle_ms());					/* the idle questions reach the modem within one rotation */
 	assert(status_of(&r).audio_slave == 1);
 	assert(acts_starting(&r, "AT+QDAI=") == writes);			/* nothing further is asked of a modem that holds the fix */
 	assert(phone_layout_due(r.p, &want) == 1 && want == 0);			/* the line is brought up at the rate it answers */

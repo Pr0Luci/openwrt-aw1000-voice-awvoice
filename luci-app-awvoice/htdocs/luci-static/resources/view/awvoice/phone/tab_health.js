@@ -167,11 +167,19 @@ return baseclass.extend({
 			var reg = yn(h.modem.registered, _('Registered'), _('Not registered'));
 			var ims = yn(h.modem.imsRegistered, _('Registered'), _('Not registered'));
 			var audio = yn(h.modem.audioSlave, _('Ready'), _('Not set'));
+			/* the network's own words for where the modem camps: the domain word separates 5G SA from NSA, which the
+			   access technology alone cannot; the numbers belong to the cell the modem actually sits on */
+			var serving = h.modem.netMode
+				? [ h.modem.netMode + (h.modem.servingBand ? ' · ' + _('band') + ' ' + h.modem.servingBand : ''),
+				    h.modem.servingRsrp != null ? h.modem.servingRsrp + ' dBm' : '—' ]
+				: [ '—', 'av-mono' ];
+			var operName = h.modem.operatorName || (h.modem.operator ? h.modem.operator + (h.modem.operatorMnc ? '-' + h.modem.operatorMnc : '') : null);
 			fill(modem, [
 				[ _('SIM'), sim[0], sim[1] ], [ _('EPS registration'), reg[0], reg[1] ], [ _('VoLTE registration'), ims[0], ims[1] ],
-				[ _('Signal (RSRP)'), h.modem.rsrpDbm == null ? '—' : h.modem.rsrpDbm + ' dBm', 'av-mono' ],
+				[ _('Signal (RSRP)'), h.modem.servingRsrp != null ? h.modem.servingRsrp + ' dBm' : (h.modem.rsrpDbm == null ? '—' : h.modem.rsrpDbm + ' dBm'), 'av-mono' ],
 				[ _('Network'), h.modem.network || '—' ],
-				[ _('Operator'), netWord(h.modem.operatorName, h.modem.operator) ],
+				[ _('Serving cell'), serving[0], serving[1] ],
+				[ _('Operator'), netWord(operName, h.modem.operator) ],
 				[ _('Audio mode'), audio[0], audio[1] ]
 			]);
 

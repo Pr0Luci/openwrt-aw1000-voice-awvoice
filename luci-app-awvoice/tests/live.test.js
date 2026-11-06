@@ -229,6 +229,13 @@ async function main() {
 		'the health tab no longer falls back on the bridge flag when the daemon says nothing');
 	assert.ok(/'Wanted, not running'/.test(healthSrc), 'the refused state has no word to show');
 	assert.ok(/Standing by/.test(healthSrc), 'the standing-by state has no word to show');
+	/* the serving cell is the honest signal: on a 5G network the EPS read (AT+CEREG, the row beside it) says little
+	 * and the modem's own answer says where it actually camps, at what power, in which domain - SA against NSA */
+	assert.ok(/h\.modem\.servingRsrp != null \? h\.modem\.servingRsrp \+ ' dBm' : \(h\.modem\.rsrpDbm == null/.test(healthSrc),
+		'the signal row prefers the serving cell over the legacy read');
+	assert.ok(/netMode/.test(healthSrc) && /Serving cell/.test(healthSrc), 'the serving cell has its own row');
+	assert.ok(/h\.modem\.operator \? h\.modem\.operator \+ \(h\.modem\.operatorMnc \? '-' \+ h\.modem\.operatorMnc/.test(healthSrc),
+		'a network with no name is shown by its digits, not as question marks');
 
 	// the numbering plan in force and the network it came from travel; a daemon that publishes neither, or publishes
 	// the two as null before it has asked, leaves both null rather than a country without a name
