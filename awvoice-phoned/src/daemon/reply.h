@@ -42,6 +42,13 @@ struct reply_info {
 	int bridge_ok;				/* the bridge counters below are valid */
 	unsigned long long bridge_frames;
 	unsigned int bridge_running, bridge_resyncs, bridge_tx_skipped, bridge_max_gap_us;
+	/* the audio path itself: whether it is crossing samples, whether something needs it and why, how long it has
+	   been up, how many times it has been brought up and let down, and the last failure (phone_audio_view_of) */
+	int audio_ok, audio_up, audio_wanted;
+	const char *audio_reason;
+	unsigned int audio_claims, audio_starts, audio_stops;
+	unsigned long long audio_up_ms;
+	int audio_error;
 	const struct indicator *ind;		/* the phone LED's state (NULL: none yet) */
 	int hd;					/* the HD voice state: 0 off, 1 wanted but the modem not switched yet, 2 on */
 	int layout;				/* the audio layout the line was brought up with: 0 = 8 kHz, 1 = 16 kHz */

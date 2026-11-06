@@ -152,6 +152,20 @@ static void info_of(const struct api_ctx *a, struct reply_info *info)
 		info->machine_greeting_ms = a->machine->greeting_ms;
 		info->machine_greeting_err = reply_greeting_word(a->machine->greeting_loaded ? 0 : a->machine->greeting_err);
 	}
+	if (a->phone) {
+		struct phone_audio_view av;
+
+		phone_audio_view_of(a->phone, &av);
+		info->audio_ok = 1;
+		info->audio_up = av.up;
+		info->audio_wanted = av.wanted;
+		info->audio_reason = av.reason;
+		info->audio_claims = av.claims;
+		info->audio_starts = av.starts;
+		info->audio_stops = av.stops;
+		info->audio_up_ms = av.since_ms;
+		info->audio_error = av.last_error;
+	}
 	if (a->bridge_stats) {
 		struct awfxs_bridge_stats bs;
 

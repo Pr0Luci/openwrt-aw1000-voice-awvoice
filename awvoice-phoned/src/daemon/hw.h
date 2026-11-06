@@ -29,6 +29,11 @@ int dev_bridge_stats(void *ctx, void *out);
 /* phone_hooks.bridge_start for ctx = struct device *: the cross bridge between the modem's and the line's PCM slots */
 int dev_bridge_start(void *ctx, unsigned int modem_rx, unsigned int modem_tx, unsigned int line_rx, unsigned int line_tx, unsigned int flags);
 
+/* phone_hooks.bridge_stop for ctx = struct device *: the module stops the crossing thread and disarms the tap and the
+ * playback with it. The PCM block and the clocks are left as they are: the line chip is the bus's slave and needs the
+ * bit clock, so bringing the block down would take the line down with it. 0 or -errno. */
+int dev_bridge_stop(void *ctx);
+
 /* the kernel bridge's capture tap (uapi AWFXS_IOC_TAP_*): arm or disarm it, then drain frames while it runs.
  * dev_tap_read fills `meta` always (generation, wideband, dropped) and returns the frames copied (0 when the ring is empty). */
 int dev_tap_set(struct device *d, int on);	/* 0 or -errno; arming needs a running bridge */

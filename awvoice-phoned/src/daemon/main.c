@@ -148,6 +148,7 @@ struct daemon {
 	long web_key_mtime;
 	long web_key_size;
 	int loop_up;			/* the event loop exists: the media socket may join it */
+	unsigned int audio_stops;		/* the audio path's stop count the daemon last saw: the module disarms the tap and the playback with it */
 	int tap_armed;			/* the kernel capture tap is armed for every sink that needs it */
 	int tap_wideband;		/* what the kernel last said about the bridge: 1 = a frame carries two samples */
 	int hd_layout;			/* the layout the audio path was brought up with: 0 = 8 kHz, 1 = 16 kHz (the PCM slots, the chip and the bridge agree on it) */
@@ -348,6 +349,7 @@ static void machine_call_start(struct daemon *dm, const struct phone_event *ev);
 static void machine_call_end(struct daemon *dm);
 static void machine_no_message(struct daemon *dm, const char *why);
 static void layout_rebuild(struct daemon *dm, int want);	/* the audio path at another rate: bring_up is defined below the step loop */
+static int audio_sync(struct daemon *dm);	/* the sinks the daemon knows about, pushed to the core: defined with the hooks */
 static void storage_measure(struct daemon *dm);	/* both folders checked, the reply told (the storage section below) */
 
 /* the line is quiet when a file may be read: on hook, no call, no message in progress. A flash read may take a moment
@@ -452,7 +454,9 @@ static int tap_add(struct daemon *dm, unsigned int bits)
 	fe_sink_set(own, bits, 1);
 	if (dm->tap_armed)
 		return 0;
-	err = dev_tap_set(&dm->dev, 1);
+	err = audio_sync(dm);		/* the tap is the bridge's: the samples must be crossing before the module takes a sink */
+	if (!err)
+		err = dev_tap_set(&dm->dev, 1);
 	if (err) {
 		fe_sink_set(own, bits, 0);
 		return err;
@@ -789,7 +793,9 @@ static void media_play_feed(struct daemon *dm)
 			arbiter_dropped(&dm->arbiter);	/* the ring has another owner: never mixed */
 			return;
 		}
-		err = dev_play_set(&dm->dev, 1);
+		err = audio_sync(dm);		/* the ring is emptied by the bridge: it is armed only while the samples cross */
+		if (!err)
+			err = dev_play_set(&dm->dev, 1);
 		if (err) {
 			fe_play_release(fe_owners(dm->fe));
 			arbiter_dropped(&dm->arbiter);
@@ -1061,7 +1067,9 @@ static int web_grant(void *ctx, uint64_t revision)
 		return -ESTALE;
 	if (fe_play_claim(fe_owners(dm->fe), FE_PLAY_WEB))
 		return -EBUSY;
-	err = dev_play_set(&dm->dev, 1);
+	err = audio_sync(dm);		/* the page's voice has nowhere to go while the bridge is standing by */
+	if (!err)
+		err = dev_play_set(&dm->dev, 1);
 	if (err) {
 		fe_play_release(fe_owners(dm->fe));
 		return err == -EBUSY ? -EBUSY : -EIO;
@@ -1598,6 +1606,8 @@ static void on_timer(struct uloop_fd *u, unsigned int events)
 		if (phone_layout_due(d.phone, &want))
 			layout_rebuild(&d, want);		/* the modem confirmed the rate on a quiet line: the layout moves now */
 	}
+	if (d.phone)
+		(void)audio_sync(&d);		/* the sinks the core cannot see, pushed for this tick (the audio follows the line) */
 	if (d.phone) {
 		struct phone_status st;
 
@@ -1757,6 +1767,57 @@ static int hook_bridge(void *ctx, unsigned int modem_rx, unsigned int modem_tx, 
 	return dev_bridge_start(&dm->dev, modem_rx, modem_tx, line_rx, line_tx, flags);
 }
 
+static int hook_bridge_stop(void *ctx)
+{
+	struct daemon *dm = ctx;
+
+	return dev_bridge_stop(&dm->dev);
+}
+
+/*
+ * Who needs the samples crossing right now. The core knows the line and the calls; it cannot see a recording in
+ * progress, a greeting halfway through the file, or a page holding the microphone, so those come to it as claims and
+ * the decision stays in one place (src/core/phone.h, phone_audio_claim). The mapping is only ever from the sinks and
+ * the playback owner: nothing here decides anything, it says what is alive.
+ */
+static void audio_claims(struct daemon *dm)
+{
+	const struct fe_owners *o = fe_owners(dm->fe);
+
+	phone_audio_claim(dm->phone, PHONE_AUDIO_RECORDER, (o->sink & FE_SINK_RECORDER) != 0);
+	phone_audio_claim(dm->phone, PHONE_AUDIO_MESSAGE, !!(o->sink & FE_SINK_MACHINE) || o->play == FE_PLAY_GREETING);
+	phone_audio_claim(dm->phone, PHONE_AUDIO_PAGE, !!(o->sink & FE_SINK_WEB) || o->play == FE_PLAY_WEB);
+	phone_audio_claim(dm->phone, PHONE_AUDIO_FRONT_END, !!(o->sink & FE_SINK_FRONT_END) || o->play == FE_PLAY_FRONT_END);
+}
+
+/*
+ * Push the claims, let the core decide, and keep the daemon's own picture of the device true. The module disarms the
+ * tap and the playback when the path goes down, so an armed flag that outlives the path would let the next sink be
+ * armed against a stopped bridge: the flags are cleared here, and clearing them when they were set is a fault in this
+ * file (nothing may claim audio without a reason the core can see), so it is said out loud rather than papered over.
+ * 0 when the samples may cross, a negative errno while they may not (the caller refuses its sink with it).
+ */
+static int audio_sync(struct daemon *dm)
+{
+	struct phone_audio_view v;
+
+	if (!dm->phone)
+		return -ENODEV;
+	audio_claims(dm);
+	(void)phone_audio_apply(dm->phone, mono_ms());
+	phone_audio_view_of(dm->phone, &v);
+	if (v.stops != dm->audio_stops) {
+		if (dm->tap_armed || dm->play_armed)
+			printf("the audio path stopped under an armed sink: the tap and the playback are disarmed with it\n");
+		dm->tap_armed = 0;
+		dm->play_armed = 0;
+		dm->audio_stops = v.stops;
+	}
+	if (v.up || !v.wanted)
+		return 0;
+	return v.last_error ? v.last_error : -EAGAIN;
+}
+
 /*
  * The audio path's counters around a call, one line when the call is answered and one when it ends (a read of the kernel
  * bridge's counters, twice per call, nothing in the 5 ms step): whether the bridge lost sync during a call decides how
@@ -1777,6 +1838,20 @@ static void audio_note(struct daemon *dm, const struct phone_event *ev)
 	if (answered) {
 		dm->audio_call = ev->call_id;
 		dm->audio_base = bs;
+		return;
+	}
+	/* the counters belong to one run of the bridge, so a path that came up again inside the call starts from zero:
+	 * taking the difference anyway would print the wrap-around as a call with millions of frames */
+	if (!bs.running) {
+		printf("call audio: the audio path was not crossing samples when the call ended\n");
+		dm->audio_call = 0;
+		return;
+	}
+	if (bs.frames < dm->audio_base.frames || bs.resyncs < dm->audio_base.resyncs ||
+		bs.tx_skipped < dm->audio_base.tx_skipped) {
+		printf("call audio: the audio path was brought up again during the call; this run: %llu frames, %u resyncs, %u transmit skips, longest service gap since start %u us\n",
+			(unsigned long long)bs.frames, bs.resyncs, bs.tx_skipped, bs.max_gap_us);
+		dm->audio_call = 0;
 		return;
 	}
 	printf("call audio: %llu frames, %u resyncs, %u transmit skips, longest service gap since start %u us\n",
@@ -2082,7 +2157,9 @@ static void machine_call_start(struct daemon *dm, const struct phone_event *ev)
 		return;
 	}
 	(void)fe_play_claim(fe_owners(dm->fe), FE_PLAY_GREETING);	/* the greeting always wins the ring */
-	err = dev_play_set(&dm->dev, 1);
+	err = audio_sync(dm);		/* the greeting is played through the bridge, so it comes up for this caller now */
+	if (!err)
+		err = dev_play_set(&dm->dev, 1);
 	if (!err) {
 		struct awfxs_play_status ps;
 
@@ -2517,7 +2594,7 @@ int main(int argc, char **argv)
 	calllog_init(&d.calls, CALLS_RAM_PATH, CALLS_FLASH_PATH, mono_ms());
 	if (!calllog_load(&d.calls, stdout))
 		printf("the call log was loaded\n");
-	d.hooks = (struct phone_hooks){ .ctx = &d, .bridge_start = hook_bridge, .modem_level = hook_level, .event = hook_event, .call_ended = hook_call_ended, .wall_clock = hook_wall_clock };
+	d.hooks = (struct phone_hooks){ .ctx = &d, .bridge_start = hook_bridge, .bridge_stop = hook_bridge_stop, .modem_level = hook_level, .event = hook_event, .call_ended = hook_call_ended, .wall_clock = hook_wall_clock };
 	snprintf(d.web_reason, sizeof(d.web_reason), "off");
 	d.api = (struct api_ctx){ .my_number = d.cfg.my_number, .channel = d.cfg.channel, .at_interface = d.cfg.at_interface,
 		.port = d.ans.port, .bridge_stats = api_bridge_stats, .reload = api_reload, .ctx = &d, .hd = d.cfg.hd, .region = d.region->name,

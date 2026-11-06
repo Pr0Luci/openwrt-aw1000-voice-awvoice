@@ -17,7 +17,7 @@ CALLLOG = $(DAEMON)/calllog.c
 INDICATOR = $(DAEMON)/indicator.c
 FAKES = tests/fakes.c tests/fakes.h
 
-TESTS = build/test_hookwatch build/test_config build/test_board build/test_cid build/test_port build/test_daemon build/test_reply build/test_modemq build/test_numbers build/test_region_follow build/test_calllog build/test_phonebook build/test_blocking build/test_alarm build/test_forward build/test_answer build/test_indicator build/test_recording build/test_recorder build/test_machine build/test_greeting_audio build/test_storage build/test_module_abi build/test_front_end build/test_fanout build/test_qmsk build/test_guards build/test_dial_answer build/test_arbiter build/test_media_rate build/test_play_mirror build/test_web_proto build/test_play_fill build/test_provision build/test_dnd
+TESTS = build/test_hookwatch build/test_config build/test_board build/test_cid build/test_port build/test_daemon build/test_reply build/test_modemq build/test_numbers build/test_region_follow build/test_calllog build/test_phonebook build/test_blocking build/test_alarm build/test_forward build/test_answer build/test_indicator build/test_recording build/test_recorder build/test_machine build/test_greeting_audio build/test_storage build/test_module_abi build/test_front_end build/test_fanout build/test_qmsk build/test_guards build/test_dial_answer build/test_arbiter build/test_media_rate build/test_play_mirror build/test_web_proto build/test_play_fill build/test_provision build/test_dnd build/test_audio_path
 
 test: core $(TESTS)
 	build/test_hookwatch && echo "hookwatch: all tests passed"
@@ -44,6 +44,7 @@ test: core $(TESTS)
 	build/test_storage
 	build/test_provision
 	build/test_dnd
+	build/test_audio_path
 	build/test_module_abi
 	build/test_front_end
 	build/test_fanout
@@ -159,6 +160,10 @@ build/test_qmsk: tests/test_qmsk.c $(DAEMON)/qmsk_server.c $(DAEMON)/qmsk_server
 
 build/test_dial_answer: tests/test_dial_answer.c $(CORE_SRC) $(CORE_HDR) $(PORT) $(DAEMON)/port.h $(FAKES)
 	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_dial_answer.c tests/fakes.c $(CORE_SRC) $(PORT)
+
+# the audio path's life: brought up by a call or a claim, let down by the watch (src/core/phone.h)
+build/test_audio_path: tests/test_audio_path.c $(CORE_SRC) $(CORE_HDR) $(PORT) $(DAEMON)/port.h $(FAKES)
+	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_audio_path.c tests/fakes.c $(CORE_SRC) $(PORT)
 
 build/test_arbiter: tests/test_arbiter.c $(DAEMON)/call_arbiter.c $(DAEMON)/call_arbiter.h $(CORE)/front_end.c $(CORE)/front_end.h $(DAEMON)/qmsk_server.c $(DAEMON)/qmsk_server.h
 	$(CC) $(CFLAGS) $(SAN) $(INC) -o $@ tests/test_arbiter.c $(DAEMON)/call_arbiter.c $(CORE)/front_end.c $(DAEMON)/qmsk_server.c
