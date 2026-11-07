@@ -33,6 +33,14 @@ function netWord(name, mcc) {
 	return name || mcc || '—';
 }
 
+/* this network prints its own name as the same word twice ("Dialog Dialog"): a word repeated back to back is one
+ * name, and the card shows it once */
+function oneName(n) {
+	var m = /^(\S+)\s+\1$/i.exec(n || '');
+
+	return m ? m[1] : (n || '');
+}
+
 function count(v) {
 	return v == null ? '—' : String(v);
 }
@@ -188,7 +196,7 @@ return baseclass.extend({
 				[ _('Signal (RSRP/SINR/RSRQ/RSSI/CSQ)'), signal, 'av-mono' ],
 				[ _('Network'), h.modem.network || '—' ],
 				[ _('Serving cell'), serving[0], serving[1] ],
-				[ _('Operator'), netWord(operName, plmn) ],
+				[ _('Operator'), netWord(oneName(operName), plmn) ],
 				[ _('Audio mode'), audio[0], audio[1] ]
 			]);
 

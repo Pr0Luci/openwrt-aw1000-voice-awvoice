@@ -239,7 +239,9 @@ async function main() {
 	assert.ok(/v == null \? '—' : v \+ \(unit/.test(healthSrc), 'a value the modem has not got is a dash, not a zero');
 	assert.ok(/var plmn = h\.modem\.operator \? h\.modem\.operator \+ \(h\.modem\.operatorMnc \|\| ''\) : null;/.test(healthSrc),
 		'the PLMN is shown as one number, country code and network code together');
-	assert.ok(/netWord\(operName, plmn\)/.test(healthSrc), 'the operator row carries that number beside the name');
+	assert.ok(/netWord\(oneName\(operName\), plmn\)/.test(healthSrc), 'the operator row carries that number beside the name');
+	assert.ok(healthSrc.includes('function oneName(n)') && healthSrc.includes('(\\S+)\\s+\\1'),
+		'a name the network prints twice is shown once');
 
 	// the numbering plan in force and the network it came from travel; a daemon that publishes neither, or publishes
 	// the two as null before it has asked, leaves both null rather than a country without a name
