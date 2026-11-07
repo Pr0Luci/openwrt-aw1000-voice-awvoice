@@ -63,6 +63,30 @@ modem software in between. The LuCI page shows the state and every setting, and 
 
 ---
 
+## What's new in 1.1.4
+
+- **The line costs nothing while it is quiet.** The audio path is brought up for a call or a claim and stands by when
+  neither needs it, instead of running for the service's whole life. On an idle line the router's load average fell
+  from about 1.3 to 0.03, and the daemon's own accounting reads 7.5 % of one core standing by and 11 % in a recorded
+  call, with a working set that does not move; the numbers and the way they were read are in *Verified on the
+  hardware*.
+- **A fresh flash speaks from its first boot.** A modem that has never been put into PCM slave mode — what a factory
+  module ships in — is set by the service itself: it writes the slave bit, restarts the modem to apply it (the vendor
+  manual: the command takes effect after rebooting, and it persists), reads it back and brings the line up. No second
+  reboot, no manual step.
+- **Calls go out on whichever network carries voice.** The dial tone and the call gate listen to both domains now, the
+  EPS registration or IMS. On a 5G SA network the EPS answer legitimately stays "not registered" while IMS carries the
+  voice, and the network routes the call itself, as a fallback to the LTE path at set-up.
+- **The microphone is heard as it is.** The send ceiling reads the samples that are actually leaving, so a talker above
+  the nominal level no longer puts clipped samples on the wire; and the browser's gain, echo and noise handling are all
+  refused, because the line side has none of them.
+- **The health card says where the line stands.** One signal line in the telephone's order — RSRP / SINR / RSRQ / RSSI
+  / CSQ, with the SINR converted from the modem's raw index by the vendor's rule; the serving cell's domain (5G SA, 5G
+  NSA, LTE) and its band; the network named once beside its PLMN (41302); and the audio path's own state, standing by
+  or crossing, with the reason.
+
+---
+
 ## What's new in 1.1.3
 
 - **The page is a phone.** A keypad, a call rail of **Call**, **Hang up** and **Flash**, two live level meters, and
@@ -575,6 +599,12 @@ call itself costs +3.3 % — with a **2.6 MB working set that did not move by a 
 window, the call, or a day of some thirty calls. The box's own load average sits at 0.02–0.14 with the line idle and
 rises to about 1.4 while a call works through the kernel bridge's thread and the stereo call recording, falling back
 when the call ends.
+
+**A modem in PCM master mode, 7 November 2026.** The modem was forced into master mode — the state a factory module
+ships in, and the reason a fresh flash can ring without speaking — and the service was started on it. The log shows it
+detect the mode, write the slave bit, restart the modem for it, read slave back and bring the line up at 16000 Hz; the
+forced state was undone by that same action, with nothing left to do by hand. The health card then carried the live
+signal line (RSRP −92 dBm, SINR 4 dB, RSRQ −11 dB, RSSI −63 dBm, CSQ 25 on LTE band 3) and the network's identity.
 
 **Nothing in the RJ11 socket, 6 November 2026.** The phone cable was unplugged from the AW1000 and the line left
 running. A call was dialled from the page's keypad and one was answered with the page's **Answer** button, both with
