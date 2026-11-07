@@ -67,7 +67,7 @@ int main(void)
 		char mcc[MQ_MCC_MAX], name[MQ_NETWORK_MAX];
 
 		assert(modemq_operator("AT+COPS?\r\r\n+COPS: 0,0,\"41301\",7\r\n\r\nOK\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 1);
-		assert(!strcmp(mcc, "413") && !name[0]);
+		assert(!strcmp(mcc, "413") && !strcmp(name, "41301"));		/* the field stays as printed: the network code is the rest of it */
 		assert(modemq_operator("+COPS: 0,0,\"413020\",7\r\nOK\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 1);
 		assert(!strcmp(mcc, "413"));					/* a three-digit network code */
 		assert(modemq_operator("+COPS: 0,0,41301,7\r\nOK\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 1);

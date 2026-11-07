@@ -208,8 +208,6 @@ int modemq_operator(const char *reply, const char *tag, unsigned int at, char *m
 		return 0;
 	memcpy(mcc, f, 3);
 	mcc[3] = 0;
-	if (ncap)
-		name[0] = 0;					/* digits were read: nothing to say about a name */
 	return 1;
 }
 
