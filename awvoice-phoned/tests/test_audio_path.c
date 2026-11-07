@@ -463,6 +463,7 @@ static void test_refused_dial_stands_by(void)
 	run_ms(&r, AUDIO_GRACE_MS + 2000);				/* past the grace: the refusal must have let the path down */
 	assert(!view_of(&r).up && !view_of(&r).wanted && !strcmp(view_of(&r).reason, "idle"));
 	assert(view_of(&r).starts == 1 && view_of(&r).stops == 1);	/* it went up for the attempt and down after it */
+	phone_close(r.p, 0);
 	rig_close(&r);
 }
 
