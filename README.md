@@ -125,23 +125,23 @@ loaded until a reboot.
 
 | file in the release | package |
 | --- | --- |
-| `kmod-awvoice-fxs-6.12.94.1.1.3-r1.apk` | the kernel module (built for that exact kernel build) |
-| `awvoice-phoned-1.1.3-r1.apk` | the phone daemon, the board file and the default greeting |
-| `luci-app-awvoice-1.1.3-r1.apk` | the LuCI page |
+| `kmod-awvoice-fxs-6.12.94.1.1.4-r1.apk` | the kernel module (built for that exact kernel build) |
+| `awvoice-phoned-1.1.4-r1.apk` | the phone daemon, the board file and the default greeting |
+| `luci-app-awvoice-1.1.4-r1.apk` | the LuCI page |
 | `SHA256SUMS`, `build-info.txt` | checksums, and the commit, SDK, feeds, kernel and target the build used |
 
 ```sh
 cd /tmp
-REL=https://github.com/Pr0Luci/openwrt-aw1000-voice-awvoice/releases/download/v1.1.3
-for f in kmod-awvoice-fxs-6.12.94.1.1.3-r1.apk awvoice-phoned-1.1.3-r1.apk luci-app-awvoice-1.1.3-r1.apk SHA256SUMS; do
+REL=https://github.com/Pr0Luci/openwrt-aw1000-voice-awvoice/releases/download/v1.1.4
+for f in kmod-awvoice-fxs-6.12.94.1.1.4-r1.apk awvoice-phoned-1.1.4-r1.apk luci-app-awvoice-1.1.4-r1.apk SHA256SUMS; do
   wget "$REL/$f"
 done
 sha256sum -c SHA256SUMS
 
 apk add --allow-untrusted \
-  /tmp/kmod-awvoice-fxs-6.12.94.1.1.3-r1.apk \
-  /tmp/awvoice-phoned-1.1.3-r1.apk \
-  /tmp/luci-app-awvoice-1.1.3-r1.apk
+  /tmp/kmod-awvoice-fxs-6.12.94.1.1.4-r1.apk \
+  /tmp/awvoice-phoned-1.1.4-r1.apk \
+  /tmp/luci-app-awvoice-1.1.4-r1.apk
 reboot
 ```
 
@@ -675,7 +675,7 @@ the greeting loaded, and every stored file hash-identical to before.
 
 ### Host tests
 
-38 suites, 35 in the daemon and 3 in the module, built and run on an ordinary computer with no hardware attached, under
+39 suites, 36 in the daemon and 3 in the module, built and run on an ordinary computer with no hardware attached, under
 AddressSanitizer and UBSan. The line logic lives in hardware-independent modules on purpose, so the tests reach all of
 it.
 
