@@ -48,7 +48,8 @@ struct rig {
 	char seq[SEQ_MAX];				/* 'u' for every bridge start, 'd' for every stop, in order */
 	unsigned int seq_count;
 	int start_err;					/* what the next bridge start answers (0 = it took) */
-	int stop_err;					/* ... and what a stop answers */
+	int stop_err;
+	int refuse_atd;			/* the modem answers ERROR to a dial */					/* ... and what a stop answers */
 	struct phone_event ev[EVENTS_MAX];
 	unsigned int ev_count;
 };
@@ -65,8 +66,7 @@ static int list_poll(void *user, int *st)
 static int list_act(void *user, const char *what)
 {
 	(void)user;
-	(void)what;
-	return 0;
+	return the_rig->refuse_atd && !strncmp(what, "ATD", 3) ? -EIO : 0;
 }
 
 static int rig_start(void *ctx, unsigned int modem_rx, unsigned int modem_tx, unsigned int line_rx,
@@ -444,6 +444,28 @@ static void test_a_refused_stop_is_tried_again(void)
 
 /* a front end with no audio device at all - the stage tool, and the core's other test rigs - is served exactly as
  * before: nothing is asked of hooks it never installed, and the view still says what the line wanted */
+/* a dial the modem refuses: the line holds no call afterwards, so the path stands by once the grace has passed. An
+ * identity left behind keeps the path wanted for the life of the service - the bridge then runs for silence and the
+ * router's load average follows it */
+static void test_refused_dial_stands_by(void)
+{
+	struct rig r;
+
+	rig_init(&r, 1);
+	r.refuse_atd = 1;
+	r.m.dtmf_events[0].at = 300; r.m.dtmf_events[0].code = 0x04;	/* '4' */
+	r.m.dtmf_events[1].at = 375; r.m.dtmf_events[1].code = 0x05;	/* '5' */
+	r.m.dtmf_events[2].at = 450; r.m.dtmf_events[2].code = 0x0c;	/* the send key */
+	r.m.dtmf_event_count = 3;
+	rig_open(&r);
+	r.m.reg[TEST_CH][REG_LCRRTP] = LCR_ON_HOOK;			/* the handset goes up: the digits below are its own */
+	run_ms(&r, 2000);
+	run_ms(&r, AUDIO_GRACE_MS + 2000);				/* past the grace: the refusal must have let the path down */
+	assert(!view_of(&r).up && !view_of(&r).wanted && !strcmp(view_of(&r).reason, "idle"));
+	assert(view_of(&r).starts == 1 && view_of(&r).stops == 1);	/* it went up for the attempt and down after it */
+	rig_close(&r);
+}
+
 static void test_without_bridge_hooks(void)
 {
 	struct rig r;
@@ -477,6 +499,7 @@ int main(void)
 	test_failure_is_said_once_and_retried();
 	test_close_stops_what_open_started();
 	test_a_refused_stop_is_tried_again();
+	test_refused_dial_stands_by();
 	test_without_bridge_hooks();
 	printf("audio_path: all tests passed\n");
 	return 0;

@@ -1606,7 +1606,8 @@ static void test_call_records(void)
 	assert(r.rec_count == 1 && r.rec[0].result == PHONE_RES_ANSWERED && r.rec[0].answered_ms && r.rec[0].end_ms - r.rec[0].answered_ms >= 2500);
 	rig_close(&r);
 
-	/* a dial the modem refuses never reaches the call list: its record is made at the refusal, once */
+	/* a dial the modem refuses never reaches the call list: its record is made at the refusal, once, and the line
+	   holds no call afterwards - an identity left behind keeps the audio path wanted for ever */
 	rig_init(&r);
 	dial_45(&r);
 	r.refuse_atd = 1;
@@ -1614,9 +1615,12 @@ static void test_call_records(void)
 	handset(&r, 1);
 	run_ms(&r, 3000);
 	assert(r.rec_count == 1 && r.rec[0].dir == PHONE_DIR_OUT && r.rec[0].result == PHONE_RES_FAILED);
+	assert(status_of(&r).call_id == 0 && status_of(&r).dir == PHONE_DIR_NONE);
+	assert(status_of(&r).call == CALL_NONE && !status_of(&r).number[0]);
 	handset(&r, 0);
 	run_ms(&r, 1500);
 	assert(r.rec_count == 1);
+	assert(status_of(&r).call_id == 0 && status_of(&r).line == PHONE_LINE_IDLE);
 	rig_close(&r);
 
 	/* an attempt that never showed in the list is closed when the next call begins; the ids rise */

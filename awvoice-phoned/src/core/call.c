@@ -1590,6 +1590,13 @@ static void on_cmd_done(struct chip *c, unsigned int ch, struct phone *p, int re
 			p->rec_cause = 0;
 			p->rec_gone_ms = now;
 			record_close(p, now);		/* the call never reached the call list */
+			/* the attempt is over, so the line holds no call any more: the identity the dial took goes with the
+			   record, exactly as it does when the front end's dial is refused and when an abandoned attempt closes */
+			p->call_id = 0;
+			p->dir = PHONE_DIR_NONE;
+			p->peer[0] = 0;
+			p->answered_ms = p->call_since_ms = 0;
+			emit(p, PHONE_EV_CALL, now);
 		}
 	} else if (!strcmp(p->mq_cmd, "ATA")) {
 		if (!res)
