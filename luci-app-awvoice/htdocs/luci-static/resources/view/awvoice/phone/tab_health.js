@@ -173,13 +173,22 @@ return baseclass.extend({
 				? [ h.modem.netMode + (h.modem.servingBand ? ' · ' + _('band') + ' ' + h.modem.servingBand : ''),
 				    h.modem.servingRsrp != null ? h.modem.servingRsrp + ' dBm' : '—' ]
 				: [ '—', 'av-mono' ];
-			var operName = h.modem.operatorName || (h.modem.operator ? h.modem.operator + (h.modem.operatorMnc ? '-' + h.modem.operatorMnc : '') : null);
+			/* the PLMN as the telephone world prints it - country code and network code as one number (41302) -
+			   with the name when the modem has one, and nothing invented when it has not */
+			var plmn = h.modem.operator ? h.modem.operator + (h.modem.operatorMnc || '') : null;
+			var operName = h.modem.operatorName || plmn;
+			/* one signal line in the telephone's own order (RSRP, SINR, RSRQ, RSSI, CSQ): the SINR is the modem's
+			   raw index converted by the vendor's rule (Y = (1/5) x X x 10 - 20), and a value the modem has not got
+			   is a dash, not a zero */
+			var sig = function (v, unit) { return v == null ? '—' : v + (unit || ''); };
+			var signal = sig(h.modem.rsrpDbm, ' dBm') + ' / ' + sig(h.modem.sinrDb, ' dB') + ' / ' + sig(h.modem.rsrqDb, ' dB')
+				+ ' / ' + sig(h.modem.rssiDbm, ' dBm') + ' / ' + (h.modem.csq == null ? '—' : _('CSQ %s').format(h.modem.csq));
 			fill(modem, [
 				[ _('SIM'), sim[0], sim[1] ], [ _('EPS registration'), reg[0], reg[1] ], [ _('VoLTE registration'), ims[0], ims[1] ],
-				[ _('Signal (RSRP)'), h.modem.servingRsrp != null ? h.modem.servingRsrp + ' dBm' : (h.modem.rsrpDbm == null ? '—' : h.modem.rsrpDbm + ' dBm'), 'av-mono' ],
+				[ _('Signal (RSRP/SINR/RSRQ/RSSI/CSQ)'), signal, 'av-mono' ],
 				[ _('Network'), h.modem.network || '—' ],
 				[ _('Serving cell'), serving[0], serving[1] ],
-				[ _('Operator'), netWord(operName, h.modem.operator) ],
+				[ _('Operator'), netWord(operName, plmn) ],
 				[ _('Audio mode'), audio[0], audio[1] ]
 			]);
 

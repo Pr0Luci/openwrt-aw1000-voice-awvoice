@@ -245,6 +245,10 @@ struct phone_status {
 	char serving_state[14];			/* its UE state word ("SEARCH", "LIMSRV", "NOCONN", "CONNECT"), "" when unknown */
 	char serving_band[14];			/* its band as the modem prints it, "" when unknown */
 	int serving_rsrp;			/* its reference signal power in dBm, or PHONE_DBM_UNKNOWN */
+	int serving_sinr;			/* its signal-to-noise ratio in dB, converted from the modem's raw index, or PHONE_DBM_UNKNOWN */
+	int serving_rsrq;			/* its reference signal received quality in dB (-20..-3), or PHONE_DBM_UNKNOWN */
+	int rssi_dbm;				/* the wideband received power (AT+QCSQ's RSSI) in dBm, or PHONE_DBM_UNKNOWN */
+	int csq;				/* the strength indicator derived from that RSSI (TS 27.007 +CSQ, 0..31), or PHONE_UNKNOWN */
 	unsigned int modem_timeouts;		/* modem requests that got no reply in time, since the start */
 	unsigned long long modem_reply_ms;	/* the clock time of the modem's last reply (0 = none yet) */
 	unsigned int faults;			/* failed chip reads and guard trips since the start */

@@ -69,11 +69,19 @@ struct modemq_cell {
 	char mcc[4];
 	char mnc[4];
 	int rsrp;
+	int rsrq;				/* dB, already as the modem prints it (-20..-3) */
+	int rssi;				/* dBm, LTE rows only */
+	int sinr_raw;				/* the modem's raw index: true SINR dB = raw * 2 - 20 (the manual's Y = (1/5) x X x 10 - 20) */
 };
 int modemq_servingcell(const char *reply, struct modemq_cell *cell);
 
 /* the service provider name (AT+QSPN, the first quoted string of the answer): copied without the quotes; 0 when the reply names nothing */
 int modemq_spn(const char *reply, char *name, size_t cap);
+/* the received signal strength of an AT+QCSQ answer in dBm (its RSSI field), MQ_UNKNOWN when there is none */
+int modemq_rssi_dbm(const char *reply);
+/* the wideband-strength indicator of an AT+QCSQ answer, from its RSSI (TS 27.007 +CSQ mapping: (RSSI + 113) x 31 / 62,
+ * clamped 0..31); MQ_UNKNOWN when the answer has no RSSI or it is outside the range the mapping covers */
+int modemq_csq(const char *reply);
 /* the access technology for display ("2G", "3G", "4G", "5G"; "" when unknown) and the band text of the reply ("LTE BAND 3"; "" when none) */
 void modemq_network(const char *reply, char *network, size_t ncap, char *band, size_t bcap);
 /*

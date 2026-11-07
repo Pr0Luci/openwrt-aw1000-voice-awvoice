@@ -318,7 +318,7 @@ int modemq_servingcell(const char *reply, struct modemq_cell *cell)
 	unsigned int n;
 
 	memset(cell, 0, sizeof(*cell));
-	cell->rsrp = MQ_UNKNOWN;
+	cell->rsrp = cell->rsrq = cell->rssi = cell->sinr_raw = MQ_UNKNOWN;
 	for (;;) {
 		p = strstr(p, "+QENG:");
 		if (!p)
@@ -354,6 +354,9 @@ int modemq_servingcell(const char *reply, struct modemq_cell *cell)
 				cell_set(cell->mnc, sizeof(cell->mnc), tok[5]);
 				cell_set(cell->band, sizeof(cell->band), tok[9]);
 				cell->rsrp = field_int(tok[13], 0);
+				cell->rsrq = field_int(tok[14], 0);
+				cell->rssi = field_int(tok[15], 0);
+				cell->sinr_raw = field_int(tok[16], 0);
 				return 0;
 			}
 			if (!strcmp(tok[2], "NR5G-SA")) {
@@ -362,6 +365,8 @@ int modemq_servingcell(const char *reply, struct modemq_cell *cell)
 				cell_set(cell->mnc, sizeof(cell->mnc), tok[5]);
 				cell_set(cell->band, sizeof(cell->band), tok[10]);
 				cell->rsrp = field_int(tok[12], 0);
+				cell->rsrq = field_int(tok[13], 0);
+				cell->rssi = cell->sinr_raw = MQ_UNKNOWN;	/* the SA shape's numbers are the manual's LTE text only in part: not converted, not invented */
 				return 0;
 			}
 			if (tok[2][0]) {				/* GSM or WCDMA: the domain is the fact, the numbers stay out */
@@ -375,6 +380,8 @@ int modemq_servingcell(const char *reply, struct modemq_cell *cell)
 			cell_set(cell->mnc, sizeof(cell->mnc), tok[2]);
 			cell_set(cell->band, sizeof(cell->band), tok[8]);
 			cell->rsrp = field_int(tok[4], 0);
+			cell->rsrq = field_int(tok[6], 0);
+			cell->rssi = cell->sinr_raw = MQ_UNKNOWN;	/* the NSA row's noise numbers have no documented conversion: left out */
 			return 0;
 		}
 		if (strchr(p, '\n'))
@@ -382,6 +389,31 @@ int modemq_servingcell(const char *reply, struct modemq_cell *cell)
 		else
 			return cell->mode[0] ? 0 : 1;
 	}
+}
+
+int modemq_rssi_dbm(const char *reply)
+{
+	const char *p = after(reply, "+QCSQ:");
+	int v;
+
+	if (!p)
+		return MQ_UNKNOWN;
+	v = field_int(p, 1);
+	return v == MQ_UNKNOWN || v < -120 || v > 0 ? MQ_UNKNOWN : v;
+}
+
+int modemq_csq(const char *reply)
+{
+	const char *p = after(reply, "+QCSQ:");
+	int rssi, csq;
+
+	if (!p)
+		return MQ_UNKNOWN;
+	rssi = field_int(p, 1);
+	if (rssi == MQ_UNKNOWN || rssi < -113 || rssi > -51)
+		return MQ_UNKNOWN;				/* outside the range the mapping covers: not invented */
+	csq = (rssi + 113) * 31 / 62;
+	return csq < 0 ? 0 : csq > 31 ? 31 : csq;
 }
 
 int modemq_spn(const char *reply, char *name, size_t cap)

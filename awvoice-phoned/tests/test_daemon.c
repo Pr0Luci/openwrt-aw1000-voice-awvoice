@@ -1301,6 +1301,7 @@ static unsigned int full_cycle_ms(void)
 
 static const char *cereg_reply = "+CEREG: 0,1\r\n\r\nOK\r\n";
 static const char *ims_reply = "+QCFG: \"ims\",0,1\r\n\r\nOK\r\n";	/* as captured on the router: the second field 1 = registered */
+static const char *qeng_reply = "+QENG: \"servingcell\",\"NOCONN\",\"LTE\",0,\"413\",\"02\",\"6E7309\",123,1300,3,0,0,\"D7A9\",-95,-12,-61,20\r\n\r\nOK\r\n";	/* the manual's LTE shape, with the raw SINR index 20 */
 static const char *qdai_reply = "+QDAI: x,1,0,4,0,0,1,1\r\n\r\nOK\r\n";	/* as captured on the router: the second field 1 = slave */
 static const char *clvl_range_reply = "+CLVL: (0-5)\r\n\r\nOK\r\n";
 static const char *qnwinfo_reply = "+QNWINFO: \"FDD LTE\",\"41302\",\"LTE BAND 3\",1725\r\n\r\nOK\r\n";	/* as captured on the router: the PLMN in digits */
@@ -1315,6 +1316,7 @@ static const char *modem_text(void *user, const char *cmd)
 	if (!strcmp(cmd, "AT+CEREG?")) { asked[1]++; return cereg_reply; }
 	if (!strncmp(cmd, "AT+QCFG", 7)) { asked[2]++; return ims_reply; }
 	if (!strcmp(cmd, "AT+QCSQ")) { asked[3]++; return "+QCSQ: \"LTE\",-62,-93,8,-11\r\n\r\nOK\r\n"; }
+	if (!strcmp(cmd, "AT+QENG=\"servingcell\"")) return qeng_reply;
 	if (!strcmp(cmd, "AT+CLIR?")) return "AT+CLIR?\r\r\n+CLIR: 1,4\r\n\r\nOK\r\n";
 	if (!strcmp(cmd, "AT+QNWINFO")) { asked[4]++; return qnwinfo_reply; }
 	if (!strcmp(cmd, "AT+COPS?")) { asked[5]++; return cops_reply; }
@@ -3060,6 +3062,24 @@ static void test_audio_check(void)
 	rig_close(&r);
 }
 
+/* the serving cell and the strength indicator: the numbers come from the modem's own answer, and the raw SINR index
+ * is converted by the vendor's rule before it is shown as a signal */
+static void test_serving_cell_and_csq(void)
+{
+	struct rig r;
+	struct phone_status st;
+
+	rig_init(&r);
+	with_questions(&r);
+	rig_open(&r);
+	run_ms(&r, full_cycle_ms());
+	st = status_of(&r);
+	assert(st.serving_rsrp == -95 && st.serving_rsrq == -12);
+	assert(st.serving_sinr == 20);					/* raw 20: Y = (1/5) x 20 x 10 - 20 = 20 dB */
+	assert(st.rssi_dbm == -62 && st.csq == 25);			/* TS 27.007: (-62 + 113) x 31 / 62 */
+	rig_close(&r);
+}
+
 /* 4. the HD setting never moves the hardware on its word: the line chip's band, the PCM slots and the bridge are one
  *    layout, and the core asks for it only after the modem itself has answered with the rate the setting wants */
 static void test_hd_layout_waits_for_the_modem(void)
@@ -3992,6 +4012,7 @@ int main(void)
 	test_hd_layout_waits_for_a_quiet_line();
 	test_hd_layout_modem_refuses();
 	test_master_mode_fixes_itself();
+	test_serving_cell_and_csq();
 	test_fast_call_list();
 	test_modem_setup();
 	test_ringback_option();

@@ -230,12 +230,16 @@ async function main() {
 	assert.ok(/'Wanted, not running'/.test(healthSrc), 'the refused state has no word to show');
 	assert.ok(/Standing by/.test(healthSrc), 'the standing-by state has no word to show');
 	/* the serving cell is the honest signal: on a 5G network the EPS read (AT+CEREG, the row beside it) says little
-	 * and the modem's own answer says where it actually camps, at what power, in which domain - SA against NSA */
-	assert.ok(/h\.modem\.servingRsrp != null \? h\.modem\.servingRsrp \+ ' dBm' : \(h\.modem\.rsrpDbm == null/.test(healthSrc),
-		'the signal row prefers the serving cell over the legacy read');
-	assert.ok(/netMode/.test(healthSrc) && /Serving cell/.test(healthSrc), 'the serving cell has its own row');
-	assert.ok(/h\.modem\.operator \? h\.modem\.operator \+ \(h\.modem\.operatorMnc \? '-' \+ h\.modem\.operatorMnc/.test(healthSrc),
-		'a network with no name is shown by its digits, not as question marks');
+	 * and the modem's own answer says where it actually camps. One line, in the telephone's own order, a dash for
+	 * anything the modem has not got, and the raw SINR index never shown without the vendor's conversion */
+	assert.ok(/'Signal \(RSRP\/SINR\/RSRQ\/RSSI\/CSQ\)'/.test(healthSrc), 'the signal is one line in the fixed order');
+	assert.ok(/h\.modem\.rsrpDbm, ' dBm'\) \+ ' \/ ' \+ sig\(h\.modem\.sinrDb/.test(healthSrc), 'RSRP leads and SINR follows it');
+	assert.ok(/sinrDb: num\(m\.sinrDb\)/.test(src), 'the SINR travels from the reply to the card');
+	assert.ok(/'CSQ %s'\)\.format\(h\.modem\.csq\)/.test(healthSrc), 'the strength indicator is named CSQ, not a bare number');
+	assert.ok(/v == null \? '—' : v \+ \(unit/.test(healthSrc), 'a value the modem has not got is a dash, not a zero');
+	assert.ok(/var plmn = h\.modem\.operator \? h\.modem\.operator \+ \(h\.modem\.operatorMnc \|\| ''\) : null;/.test(healthSrc),
+		'the PLMN is shown as one number, country code and network code together');
+	assert.ok(/netWord\(operName, plmn\)/.test(healthSrc), 'the operator row carries that number beside the name');
 
 	// the numbering plan in force and the network it came from travel; a daemon that publishes neither, or publishes
 	// the two as null before it has asked, leaves both null rather than a country without a name

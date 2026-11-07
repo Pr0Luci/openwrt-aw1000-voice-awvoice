@@ -132,6 +132,8 @@ struct phone {
 	unsigned int info_next;		/* the question to ask next */
 	unsigned long long info_due_ms;
 	int sim_ready, registered, ims, rsrp_dbm, audio_slave, audio_rate, clir, clir_status;
+	int csq;				/* the wideband-strength indicator of the AT+QCSQ answer (TS 27.007 mapping of its RSSI) */
+	int rssi_dbm;			/* the wideband received power (AT+QCSQ, its RSSI field) */
 	enum { RING_FOR_CALL, RING_FOR_ALARM } ring_for;	/* what the ring that is being started is for: an alarm sends no caller id */
 	unsigned long long alarm_next_ms;	/* the next check of the alarm clock */
 	/* call forwarding at the network: erase, register, read back (forward.h) */
@@ -1808,6 +1810,8 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		keep_known(&p->ims, modemq_ims(text));
 	} else if (!strcmp(cmd, "AT+QCSQ")) {
 		keep_known(&p->rsrp_dbm, modemq_rsrp_dbm(text));
+		keep_known(&p->rssi_dbm, modemq_rssi_dbm(text));
+		keep_known(&p->csq, modemq_csq(text));
 	} else if (!strcmp(cmd, "AT+CLIR?")) {
 		int status;
 		int n = modemq_clir(text, &status);
@@ -2771,7 +2775,7 @@ struct phone *phone_attach(struct chip *c, unsigned int ch, const struct board *
 	p->next_ring_ms = now + RING_POLL_MS;
 	p->next_sample_ms = now + GUARD_MS;
 	p->poll_due_ms = now;
-	p->sim_ready = p->registered = p->ims = p->rsrp_dbm = p->audio_slave = p->audio_rate = p->clir = p->clir_status = p->ccwa_net = MQ_UNKNOWN;
+	p->sim_ready = p->registered = p->ims = p->rsrp_dbm = p->rssi_dbm = p->audio_slave = p->audio_rate = p->clir = p->clir_status = p->ccwa_net = p->csq = MQ_UNKNOWN;
 	memset(&p->cell, 0, sizeof(p->cell));
 	p->cell.rsrp = MQ_UNKNOWN;
 	p->mnc[0] = p->spn[0] = 0;
@@ -3493,6 +3497,11 @@ void phone_status(const struct phone *p, struct phone_status *st)
 	snprintf(st->serving_state, sizeof(st->serving_state), "%s", p->cell.state);
 	snprintf(st->serving_band, sizeof(st->serving_band), "%s", p->cell.band);
 	st->serving_rsrp = p->cell.rsrp == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->cell.rsrp;
+	/* the raw index is not the signal: the manual converts it, Y = (1/5) x X x 10 - 20 (0..250 -> -20..30 dB) */
+	st->serving_sinr = p->cell.sinr_raw == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->cell.sinr_raw * 2 - 20;
+	st->serving_rsrq = p->cell.rsrq == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->cell.rsrq;
+	st->rssi_dbm = p->rssi_dbm == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->rssi_dbm;
+	st->csq = p->csq == MQ_UNKNOWN ? PHONE_UNKNOWN : p->csq;
 	st->modem_timeouts = p->modem_timeouts;
 	st->modem_reply_ms = p->modem_reply_ms;
 	st->faults = p->faults;

@@ -81,7 +81,7 @@ static void ago_s(const struct reply_sink *o, const char *name, unsigned long lo
 
 static void network(const struct reply_sink *o, const struct phone_status *st)
 {
-	const char *name = st->netname[0] ? st->netname : st->spn;
+	const char *name = st->spn[0] ? st->spn : st->netname;	/* the service provider name first: the networks own name can print a word twice */
 
 	if (st->network[0])
 		o->text(o->ctx, "network", st->network);
@@ -117,6 +117,22 @@ static void network(const struct reply_sink *o, const struct phone_status *st)
 		o->text(o->ctx, "servingBand", st->serving_band);
 	else
 		o->null(o->ctx, "servingBand");
+	if (st->serving_mode[0] && st->serving_sinr != PHONE_DBM_UNKNOWN)
+		o->number(o->ctx, "sinrDb", st->serving_sinr);
+	else
+		o->null(o->ctx, "sinrDb");
+	if (st->serving_mode[0] && st->serving_rsrq != PHONE_DBM_UNKNOWN)
+		o->number(o->ctx, "rsrqDb", st->serving_rsrq);
+	else
+		o->null(o->ctx, "rsrqDb");
+	if (st->rssi_dbm != PHONE_DBM_UNKNOWN)
+		o->number(o->ctx, "rssiDbm", st->rssi_dbm);
+	else
+		o->null(o->ctx, "rssiDbm");
+	if (st->csq != PHONE_UNKNOWN)
+		o->number(o->ctx, "csq", st->csq);
+	else
+		o->null(o->ctx, "csq");
 }
 
 void reply_status(const struct reply_sink *o, const struct phone_status *st, const struct reply_info *info, unsigned long long now_ms)
