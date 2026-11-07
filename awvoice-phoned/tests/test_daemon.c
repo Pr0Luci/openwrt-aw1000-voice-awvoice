@@ -1815,7 +1815,6 @@ static void test_blocking_calls(void)
 	run_ms(&r, 3000);
 	assert(acts_of(&r, "ATD45;") == 0 && status_of(&r).line == PHONE_LINE_RELEASE && status_of(&r).call_id == 0);
 	assert(r.rec_count == 1 && r.rec[0].dir == PHONE_DIR_OUT && r.rec[0].result == PHONE_RES_BLOCKED && !strcmp(r.rec[0].number, "45"));
-	fprintf(stderr, "DEBUG count=%u strstr45=%d\n", count_in(log_text(&r), "a blocked number was dialled"), strstr(log_text(&r), "45") != NULL);
 	assert(count_in(log_text(&r), "a blocked number was dialled") == 1);
 	/* the dialled digits are pinned at the one place a number could leave the box: the modem was never asked (the
 	 * assert above). The service log carries unrelated counters of its own - a calibration line can say "45 polls" -

@@ -3494,7 +3494,6 @@ void phone_status(const struct phone *p, struct phone_status *st)
 	snprintf(st->netname, sizeof(st->netname), "%s", p->netname);
 	snprintf(st->spn, sizeof(st->spn), "%s", p->spn);
 	snprintf(st->serving_mode, sizeof(st->serving_mode), "%s", p->cell.mode);
-	snprintf(st->serving_state, sizeof(st->serving_state), "%s", p->cell.state);
 	snprintf(st->serving_band, sizeof(st->serving_band), "%s", p->cell.band);
 	st->serving_rsrp = p->cell.rsrp == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->cell.rsrp;
 	/* the raw index is not the signal: the manual converts it, Y = (1/5) x X x 10 - 20 (0..250 -> -20..30 dB) */
