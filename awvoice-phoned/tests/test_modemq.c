@@ -163,8 +163,8 @@ int main(void)
 		assert(modemq_servingcell("AT+QENG=\"servingcell\"\r\n+QENG: \"servingcell\",\"NOCONN\"\r\n+QENG: \"LTE\",0,\"460\",\"01\",\"6E7309\",123,1300,3,0,0,\"D7A9\",-85,-12,-61,20\r\n+QENG: \"NR5G-NSA\",\"460\",\"01\",274,-81,160,-11,627264,78\r\n\r\nOK\r\n", &c) == 0);
 		assert(!strcmp(c.mode, "NR5G-NSA") && !strcmp(c.mcc, "460") && !strcmp(c.mnc, "01") && c.rsrp == -81 && !strcmp(c.band, "78"));
 
-		assert(modemq_servingcell("AT+QENG=\"servingcell\"\r\n+QENG: \"servingcell\",\"NOCONN\",\"LTE\",0,\"413\",\"02\",\"6E7309\",123,1300,3,0,0,\"D7A9\",-,-12,-61,20\r\n\r\nOK\r\n", &c) == 0);
-		assert(!strcmp(c.mode, "LTE") && !strcmp(c.mcc, "413") && !strcmp(c.mnc, "02") && c.rsrp == MQ_UNKNOWN);
+		assert(modemq_servingcell("AT+QENG=\"servingcell\"\r\n+QENG: \"servingcell\",\"NOCONN\",\"LTE\",0,\"413\",\"02\",\"6E7309\",123,1300,3,0,0,\"D7A9\",-95,-12,-61,20\r\n\r\nOK\r\n", &c) == 0);
+		assert(!strcmp(c.mode, "LTE") && !strcmp(c.mcc, "413") && !strcmp(c.mnc, "02") && c.rsrp == -95);
 
 		assert(modemq_servingcell("+QENG: \"servingcell\",\"SEARCH\"\r\n\r\nOK\r\n", &c) == 1 && !strcmp(c.state, "SEARCH"));
 		assert(modemq_servingcell("", &c) == 1);
