@@ -303,6 +303,16 @@ int modemq_ccwa(const char *reply)
  *        +QENG: "NR5G-NSA",<MCC>,<MNC>,<PCID>,<RSRP>,<SINR>,<RSRQ>,<ARFCN>,<band>
  * A value the modem prints as "-" is a value it does not have: kept out rather than invented.
  */
+static void cell_set(char *out, size_t cap, const char *tok)
+{
+	size_t n = strlen(tok);
+
+	if (n >= cap)
+		n = cap - 1;
+	memcpy(out, tok, n);
+	out[n] = 0;
+}
+
 int modemq_servingcell(const char *reply, struct modemq_cell *cell)
 {
 	char tok[18][14];
@@ -339,33 +349,33 @@ int modemq_servingcell(const char *reply, struct modemq_cell *cell)
 				break;
 		}
 		if (!strcmp(tok[0], "servingcell")) {
-			snprintf(cell->state, sizeof(cell->state), "%s", tok[1]);
+			cell_set(cell->state, sizeof(cell->state), tok[1]);
 			if (!strcmp(tok[2], "LTE")) {
 				snprintf(cell->mode, sizeof(cell->mode), "LTE");
-				snprintf(cell->mcc, sizeof(cell->mcc), "%s", tok[4]);
-				snprintf(cell->mnc, sizeof(cell->mnc), "%s", tok[5]);
-				snprintf(cell->band, sizeof(cell->band), "%s", tok[9]);
+				cell_set(cell->mcc, sizeof(cell->mcc), tok[4]);
+				cell_set(cell->mnc, sizeof(cell->mnc), tok[5]);
+				cell_set(cell->band, sizeof(cell->band), tok[9]);
 				cell->rsrp = field_int(tok[13], 0);
 				return 0;
 			}
 			if (!strcmp(tok[2], "NR5G-SA")) {
 				snprintf(cell->mode, sizeof(cell->mode), "NR5G-SA");
-				snprintf(cell->mcc, sizeof(cell->mcc), "%s", tok[4]);
-				snprintf(cell->mnc, sizeof(cell->mnc), "%s", tok[5]);
-				snprintf(cell->band, sizeof(cell->band), "%s", tok[10]);
+				cell_set(cell->mcc, sizeof(cell->mcc), tok[4]);
+				cell_set(cell->mnc, sizeof(cell->mnc), tok[5]);
+				cell_set(cell->band, sizeof(cell->band), tok[10]);
 				cell->rsrp = field_int(tok[12], 0);
 				return 0;
 			}
 			if (tok[2][0]) {				/* GSM or WCDMA: the domain is the fact, the numbers stay out */
-				snprintf(cell->mode, sizeof(cell->mode), "%s", tok[2]);
+				cell_set(cell->mode, sizeof(cell->mode), tok[2]);
 				return 0;
 			}
 			/* the anchor line of an EN-DC answer: its mode word comes on the rows behind it */
 		} else if (!strcmp(tok[0], "NR5G-NSA")) {
 			snprintf(cell->mode, sizeof(cell->mode), "NR5G-NSA");
-			snprintf(cell->mcc, sizeof(cell->mcc), "%s", tok[1]);
-			snprintf(cell->mnc, sizeof(cell->mnc), "%s", tok[2]);
-			snprintf(cell->band, sizeof(cell->band), "%s", tok[8]);
+			cell_set(cell->mcc, sizeof(cell->mcc), tok[1]);
+			cell_set(cell->mnc, sizeof(cell->mnc), tok[2]);
+			cell_set(cell->band, sizeof(cell->band), tok[8]);
 			cell->rsrp = field_int(tok[4], 0);
 			return 0;
 		}

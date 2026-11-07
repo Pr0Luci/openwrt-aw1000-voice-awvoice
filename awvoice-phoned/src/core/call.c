@@ -1826,8 +1826,14 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		/* the same network in the modem's own query, where this one carries the PLMN as digits; it says nothing
 		 * when the standard +COPS? read already gave them */
 		if (modemq_operator(text, "+QNWINFO:", 1, mcc, sizeof(mcc), raw, sizeof(raw)) == 1) {
-			memcpy(p->mcc, mcc, sizeof(mcc));
-			snprintf(p->mnc, sizeof(p->mnc), "%s", raw[0] ? raw + 3 : "");	/* the digits after the country code ("41302" -> "02") */
+			const char *rest = raw[0] ? raw + 3 : "";	/* the digits after the country code ("41302" -> "02") */
+			size_t n = strlen(rest);
+
+			memcpy(p->mcc, mcc, sizeof(p->mcc));
+			if (n >= sizeof(p->mnc))
+				n = sizeof(p->mnc) - 1;
+			memcpy(p->mnc, rest, n);
+			p->mnc[n] = 0;
 			p->mcc_named = 0;
 			p->mcc_warned = 0;
 		} else if (!p->mcc[0] && p->mcc_named && !p->mcc_warned) {

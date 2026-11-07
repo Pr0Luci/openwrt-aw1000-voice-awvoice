@@ -63,9 +63,9 @@ int modemq_rsrp_dbm(const char *reply);
  * dBm (MQ_UNKNOWN when the answer holds none). 0 when a row was read, 1 when the reply holds no row of this kind.
  */
 struct modemq_cell {
-	char state[10];
-	char mode[12];
-	char band[12];
+	char state[14];
+	char mode[14];
+	char band[14];
 	char mcc[4];
 	char mnc[4];
 	int rsrp;
