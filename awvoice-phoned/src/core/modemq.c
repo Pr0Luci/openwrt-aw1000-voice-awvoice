@@ -6,7 +6,7 @@
 
 #include "modemq.h"
 
-const char *const modemq_command[] = { "AT+QDAI?", "AT+CLVL=?", "AT+CPIN?", "AT+CEREG?", "AT+QCFG=\"ims\"", "AT+QCSQ", "AT+QNWINFO", "AT+CLIR?", "AT+COPS?" };
+const char *const modemq_command[] = { "AT+QDAI?", "AT+CLVL=?", "AT+CPIN?", "AT+CEREG?", "AT+QCFG=\"ims\"", "AT+QCSQ", "AT+QNWINFO", "AT+CLIR?", "AT+COPS?", "AT+QENG=\"servingcell\"", "AT+QSPN" };
 const unsigned int modemq_count = sizeof(modemq_command) / sizeof(modemq_command[0]);
 
 /* the text after the tag, skipping the blanks; NULL when the tag is absent */
@@ -208,8 +208,6 @@ int modemq_operator(const char *reply, const char *tag, unsigned int at, char *m
 		return 0;
 	memcpy(mcc, f, 3);
 	mcc[3] = 0;
-	if (ncap)
-		name[0] = 0;					/* digits were read: nothing to say about a name */
 	return 1;
 }
 
@@ -291,4 +289,156 @@ int modemq_ccwa(const char *reply)
 			return (int)status;
 	}
 	return MQ_UNKNOWN;
+}
+
+/*
+ * The serving cell (AT+QENG="servingcell", the manual's shapes this port reads: NR5G-SA, EN-DC and LTE; GSM and WCDMA
+ * set the mode word and nothing else). The answer is one to three lines:
+ *   SA:  +QENG: "servingcell",<state>,"NR5G-SA",<duplex>,<MCC>,<MNC>,<cellID>,<PCID>,<TAC>,<ARFCN>,<band>,<DLbw>,<RSRP>,<RSRQ>,<SINR>,...
+ *   LTE: +QENG: "servingcell",<state>,"LTE",<is_tdd>,<MCC>,<MNC>,<cellID>,<PCID>,<earfcn>,<band>,<ULbw>,<DLbw>,<TAC>,<RSRP>,<RSRQ>,<RSSI>,<SINR>,...
+ *   NSA: +QENG: "servingcell",<state>   (the anchor line, no mode word of its own)
+ *        +QENG: "LTE",...               (the anchor's row)
+ *        +QENG: "NR5G-NSA",<MCC>,<MNC>,<PCID>,<RSRP>,<SINR>,<RSRQ>,<ARFCN>,<band>
+ * A value the modem prints as "-" is a value it does not have: kept out rather than invented.
+ */
+static void cell_set(char *out, size_t cap, const char *tok)
+{
+	size_t n = strlen(tok);
+
+	if (n >= cap)
+		n = cap - 1;
+	memcpy(out, tok, n);
+	out[n] = 0;
+}
+
+int modemq_servingcell(const char *reply, struct modemq_cell *cell)
+{
+	char tok[18][14];
+	const char *p = reply;
+	unsigned int n;
+
+	memset(cell, 0, sizeof(*cell));
+	cell->rsrp = cell->rsrq = cell->rssi = cell->sinr_raw = MQ_UNKNOWN;
+	for (;;) {
+		p = strstr(p, "+QENG:");
+		if (!p)
+			return cell->mode[0] ? 0 : 1;
+		p += strlen("+QENG:");
+		while (*p == ' ' || *p == '"')
+			p++;
+		memset(tok, 0, sizeof(tok));				/* a short line leaves the tokens behind it empty, not whatever was there before */
+		for (n = 0; n < 18; n++) {
+			size_t len;
+
+			while (*p == ' ' || *p == '"')
+				p++;				/* a field prints as plain text or in quotes: the quotes are its skin, not its content */
+			len = strcspn(p, ",\r\n\"");			/* the token runs to the first comma, quote or line end, whichever is first */
+			if (len >= sizeof(tok[n]))
+				len = sizeof(tok[n]) - 1;
+			memcpy(tok[n], p, len);
+			tok[n][len] = 0;
+			p += len;
+			while (*p == '"' || *p == ' ')
+				p++;				/* the closing quote goes with the token */
+			if (*p != ',')
+				break;				/* the line is over */
+			p++;
+			if (*p == '\r' || *p == '\n' || !*p)
+				break;
+		}
+		if (!strcmp(tok[0], "servingcell")) {
+			cell_set(cell->state, sizeof(cell->state), tok[1]);
+			if (!strcmp(tok[2], "LTE")) {
+				snprintf(cell->mode, sizeof(cell->mode), "LTE");
+				cell_set(cell->mcc, sizeof(cell->mcc), tok[4]);
+				cell_set(cell->mnc, sizeof(cell->mnc), tok[5]);
+				cell_set(cell->band, sizeof(cell->band), tok[9]);
+				cell->rsrp = field_int(tok[13], 0);
+				cell->rsrq = field_int(tok[14], 0);
+				cell->rssi = field_int(tok[15], 0);
+				cell->sinr_raw = field_int(tok[16], 0);
+				return 0;
+			}
+			if (!strcmp(tok[2], "NR5G-SA")) {
+				snprintf(cell->mode, sizeof(cell->mode), "NR5G-SA");
+				cell_set(cell->mcc, sizeof(cell->mcc), tok[4]);
+				cell_set(cell->mnc, sizeof(cell->mnc), tok[5]);
+				cell_set(cell->band, sizeof(cell->band), tok[10]);
+				cell->rsrp = field_int(tok[12], 0);
+				cell->rsrq = field_int(tok[13], 0);
+				cell->rssi = cell->sinr_raw = MQ_UNKNOWN;	/* the SA shape's numbers are the manual's LTE text only in part: not converted, not invented */
+				return 0;
+			}
+			if (tok[2][0]) {				/* GSM or WCDMA: the domain is the fact, the numbers stay out */
+				cell_set(cell->mode, sizeof(cell->mode), tok[2]);
+				return 0;
+			}
+			/* the anchor line of an EN-DC answer: its mode word comes on the rows behind it */
+		} else if (!strcmp(tok[0], "NR5G-NSA")) {
+			snprintf(cell->mode, sizeof(cell->mode), "NR5G-NSA");
+			cell_set(cell->mcc, sizeof(cell->mcc), tok[1]);
+			cell_set(cell->mnc, sizeof(cell->mnc), tok[2]);
+			cell_set(cell->band, sizeof(cell->band), tok[8]);
+			cell->rsrp = field_int(tok[4], 0);
+			cell->rsrq = field_int(tok[6], 0);
+			cell->rssi = cell->sinr_raw = MQ_UNKNOWN;	/* the NSA row's noise numbers have no documented conversion: left out */
+			return 0;
+		}
+		if (strchr(p, '\n'))
+			p = strchr(p, '\n') + 1;
+		else
+			return cell->mode[0] ? 0 : 1;
+	}
+}
+
+int modemq_rssi_dbm(const char *reply)
+{
+	const char *p = after(reply, "+QCSQ:");
+	int v;
+
+	if (!p)
+		return MQ_UNKNOWN;
+	v = field_int(p, 1);
+	return v == MQ_UNKNOWN || v < -120 || v > 0 ? MQ_UNKNOWN : v;
+}
+
+int modemq_csq(const char *reply)
+{
+	const char *p = after(reply, "+QCSQ:");
+	int rssi, csq;
+
+	if (!p)
+		return MQ_UNKNOWN;
+	rssi = field_int(p, 1);
+	if (rssi == MQ_UNKNOWN || rssi < -113 || rssi > -51)
+		return MQ_UNKNOWN;				/* outside the range the mapping covers: not invented */
+	csq = (rssi + 113) * 31 / 62;
+	return csq < 0 ? 0 : csq > 31 ? 31 : csq;
+}
+
+int modemq_spn(const char *reply, char *name, size_t cap)
+{
+	const char *p = after(reply, "+QSPN:"), *end;
+	size_t n;
+
+	if (cap)
+		name[0] = 0;
+	if (!p)
+		return 0;
+	while (*p == ' ')
+		p++;
+	if (*p != '"')
+		return 0;
+	p++;
+	end = strchr(p, '"');
+	if (!end)
+		return 0;
+	n = (size_t)(end - p);
+	if (!n)
+		return 0;
+	if (n >= cap)
+		n = cap - 1;
+	memcpy(name, p, n);
+	name[n] = 0;
+	return 1;
 }

@@ -132,6 +132,8 @@ struct phone {
 	unsigned int info_next;		/* the question to ask next */
 	unsigned long long info_due_ms;
 	int sim_ready, registered, ims, rsrp_dbm, audio_slave, audio_rate, clir, clir_status;
+	int csq;				/* the wideband-strength indicator of the AT+QCSQ answer (TS 27.007 mapping of its RSSI) */
+	int rssi_dbm;			/* the wideband received power (AT+QCSQ, its RSSI field) */
 	enum { RING_FOR_CALL, RING_FOR_ALARM } ring_for;	/* what the ring that is being started is for: an alarm sends no caller id */
 	unsigned long long alarm_next_ms;	/* the next check of the alarm clock */
 	/* call forwarding at the network: erase, register, read back (forward.h) */
@@ -199,6 +201,9 @@ struct phone {
 	int mcc_warned;			/* the modem named its network in text instead of digits: said once per registration */
 	int mcc_named;			/* a reply carried a name where the digits were asked for */
 	char netname[MQ_NETWORK_MAX];	/* the name the modem gives for its network, where it gives a name at all (the page and the log show it) */
+	char mnc[MQ_MCC_MAX];		/* the digits after the country code in the PLMN the modem camps on ("" until +QNWINFO gives it) */
+	char spn[24];			/* the service provider name (AT+QSPN), kept beside the network's own name for the page */
+	struct modemq_cell cell;	/* the serving cell as AT+QENG="servingcell" last answered it ("" / MQ_UNKNOWN until then) */
 	/* the watch's own timing record: the hook must be read every few ms whatever else the loop does */
 	unsigned long long hook_at_ms;	/* the clock time of the last hook read */
 	unsigned long long slow_ms;	/* the slowest task since the last hook read ... */
@@ -1769,8 +1774,15 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		if (modemq_qdai_head(text, head, sizeof(head)) && !p->qdai_head[0])
 			memcpy(p->qdai_head, head, sizeof(p->qdai_head));	/* the first field, written back as the modem prints it */
 		if (p->audio_slave == 0 && !p->audio_warned) {
+			/* master mode is not a fault the operator has to fix by hand: the write the HD exchange below owns
+			   carries the slave bit with the wanted rate, and the restart that follows is what applies it */
 			p->audio_warned = 1;
-			stamped(p->log, "  channel %u: warning: the modem is not in slave mode (AT+QDAI?): the voice path cannot work; it is not changed here\n", p->ch);
+			p->hd_want = 1;
+			p->hd_gave_up = 0;
+			p->hd_waiting = 0;
+			p->hd_asks = 0;
+			p->hd_stage = HD_IDLE;
+			stamped(p->log, "  channel %u: the modem is not in slave mode (AT+QDAI?): the slave write is owed once the line is quiet\n", p->ch);
 		}
 		/* the rate the modem puts on the bus is kept here for the status and for the exchange below. Nothing is
 		   decided from it: the question is read-only, and the answer may land after the handset was lifted -
@@ -1798,6 +1810,8 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		keep_known(&p->ims, modemq_ims(text));
 	} else if (!strcmp(cmd, "AT+QCSQ")) {
 		keep_known(&p->rsrp_dbm, modemq_rsrp_dbm(text));
+		keep_known(&p->rssi_dbm, modemq_rssi_dbm(text));
+		keep_known(&p->csq, modemq_csq(text));
 	} else if (!strcmp(cmd, "AT+CLIR?")) {
 		int status;
 		int n = modemq_clir(text, &status);
@@ -1806,7 +1820,7 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		if (n != MQ_UNKNOWN)
 			p->clir_status = status;
 	} else if (!strcmp(cmd, "AT+QNWINFO")) {
-		char net[MQ_NETWORK_MAX], band[MQ_NETWORK_MAX], mcc[MQ_MCC_MAX];
+		char net[MQ_NETWORK_MAX], band[MQ_NETWORK_MAX], mcc[MQ_MCC_MAX], raw[MQ_NETWORK_MAX];
 
 		modemq_network(text, net, sizeof(net), band, sizeof(band));
 		if (net[0]) {
@@ -1815,8 +1829,15 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 		}
 		/* the same network in the modem's own query, where this one carries the PLMN as digits; it says nothing
 		 * when the standard +COPS? read already gave them */
-		if (modemq_operator(text, "+QNWINFO:", 1, mcc, sizeof(mcc), NULL, 0) == 1) {
-			memcpy(p->mcc, mcc, sizeof(mcc));
+		if (modemq_operator(text, "+QNWINFO:", 1, mcc, sizeof(mcc), raw, sizeof(raw)) == 1) {
+			const char *rest = raw[0] ? raw + 3 : "";	/* the digits after the country code ("41302" -> "02") */
+			size_t n = strlen(rest);
+
+			memcpy(p->mcc, mcc, sizeof(p->mcc));
+			if (n >= sizeof(p->mnc))
+				n = sizeof(p->mnc) - 1;
+			memcpy(p->mnc, rest, n);
+			p->mnc[n] = 0;
 			p->mcc_named = 0;
 			p->mcc_warned = 0;
 		} else if (!p->mcc[0] && p->mcc_named && !p->mcc_warned) {
@@ -1824,6 +1845,22 @@ static void on_info_done(struct phone *p, int res, unsigned long long now)
 			stamped(p->log, "  channel %u: the modem names its network '%s': no digits to choose a numbering plan from\n",
 				p->ch, p->netname);
 		}
+	} else if (!strcmp(cmd, "AT+QENG=\"servingcell\"")) {
+		struct modemq_cell now_cell;
+
+		/* a snapshot, not a kept fact: the newest complete answer is what the radio is on now. The line carries the
+		 * domain word alone — the log never carries a number, and the digits of the cell live in the health reply */
+		if (modemq_servingcell(text, &now_cell) == 0) {
+			if (strcmp(now_cell.mode, p->cell.mode))
+				stamped(p->log, "  channel %u: the serving cell moves to %s (%s)\n", p->ch, now_cell.mode, now_cell.state);
+			p->cell = now_cell;
+		}
+	} else if (!strcmp(cmd, "AT+QSPN")) {
+		char name[sizeof(p->spn)];
+
+		/* the service provider name is the third way of naming a network: it fills in where the standard reads gave nothing */
+		if (modemq_spn(text, name, sizeof(name)) && name[0])
+			snprintf(p->spn, sizeof(p->spn), "%s", name);
 	} else if (!strcmp(cmd, "AT+COPS?")) {
 		char mcc[MQ_MCC_MAX], name[MQ_NETWORK_MAX];
 		int verdict = modemq_operator(text, "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name));
@@ -2221,15 +2258,16 @@ static void progress_tick(struct chip *c, unsigned int ch, struct phone *p, unsi
 
 /*
  * Is there service for a call? Without a modem client (the stage tool's bench stages) there is nothing to ask and the dial tone
- * is the rule. With one: the modem port is open and answering, and the network does not say "not registered" (+CEREG, an unknown
- * answer counts as service so that a lift right after the start is not refused). ITU-T E.180: the congestion tone says the call
- * cannot be set up.
+ * is the rule. With one: the modem port is open and answering, and a network carries voice — the EPS path (+CEREG 1/5, the
+ * VoLTE and CSFB route) or the IMS one (+QCFG="ims", the 5G route: on a 5G SA network the EPS answer legitimately stays
+ * "not registered" and the call goes out as a network-triggered fallback). An unknown answer counts as service so that a lift
+ * right after the start is not refused. ITU-T E.180: the congestion tone says the call cannot be set up.
  */
 static int service_ok(const struct phone *p)
 {
 	if (!p->call || !p->call->begin)
 		return 1;
-	return has_modem(p) && p->poll_bad < POLL_BAD_MAX && p->registered != 0;
+	return has_modem(p) && p->poll_bad < POLL_BAD_MAX && (p->registered != 0 || p->ims == 1);
 }
 
 /* the dial tone for a lifted handset: only when the line is idle and no call is ringing in */
@@ -2243,7 +2281,8 @@ static void present_dial_tone(struct chip *c, unsigned int ch, struct phone *p, 
 		/* no service: the congestion tone (the cadence runs from the progress tick); the keys are still collected when the modem is there (emergency numbers) */
 		release_tone_start(p, now);
 		set_line(p, LINE_NO_SERVICE, now);
-		stamped(log, "  channel %u: no service (%s): the congestion tone\n", ch, has_modem(p) ? "not registered" : "no modem");
+		stamped(log, "  channel %u: no service (%s): the congestion tone\n", ch,
+			has_modem(p) ? "no network carries voice yet" : "no modem");
 		p->info_next = info_index("AT+CEREG?");
 		p->info_due_ms = now;
 		return;
@@ -2736,7 +2775,10 @@ struct phone *phone_attach(struct chip *c, unsigned int ch, const struct board *
 	p->next_ring_ms = now + RING_POLL_MS;
 	p->next_sample_ms = now + GUARD_MS;
 	p->poll_due_ms = now;
-	p->sim_ready = p->registered = p->ims = p->rsrp_dbm = p->audio_slave = p->audio_rate = p->clir = p->clir_status = p->ccwa_net = MQ_UNKNOWN;
+	p->sim_ready = p->registered = p->ims = p->rsrp_dbm = p->rssi_dbm = p->audio_slave = p->audio_rate = p->clir = p->clir_status = p->ccwa_net = p->csq = MQ_UNKNOWN;
+	memset(&p->cell, 0, sizeof(p->cell));
+	p->cell.rsrp = MQ_UNKNOWN;
+	p->mnc[0] = p->spn[0] = 0;
 	p->fwd_want = p->cfg.forward.configured;
 	modem_setup(p, now);			/* the service's modem setup (volatile settings of the modem) */
 	return p;
@@ -3154,17 +3196,22 @@ int phone_step(struct phone *p, unsigned long long now)
 				stamped(p->log, "  channel %u: HD voice %s: the modem's PCM rate has not been read yet; the change waits for it\n",
 					p->ch, p->cfg.hd ? "on" : "off");
 			}
-		} else if (p->audio_rate == (p->cfg.hd ? 1 : 0)) {
+		} else if (p->audio_rate == (p->cfg.hd ? 1 : 0) && p->audio_slave != 0) {
 			/* the modem already keeps the wanted rate - it persists in the modem across its restarts - so
-			   there is nothing to ask and no data to drop: the line is what owes the bring-up */
+			   there is nothing to ask and no data to drop: the line is what owes the bring-up. A modem in
+			   master mode is asked anyway (the slave bit above is what makes the voice path work), which is
+			   why the rate matching alone is not enough to leave it alone */
 			p->hd_want = 0;
 			p->hd_layout_due = 1;
 			stamped(p->log, "  channel %u: the modem already answers %d kHz: the line is brought up at that rate\n",
 				p->ch, p->cfg.hd ? 16 : 8);
 		} else if (p->hd_asks < HD_ASK_MAX) {
 			p->hd_asks++;
-			stamped(p->log, "  channel %u: HD voice %s: the modem's PCM rate changes and the modem restarts (mobile data drops for about half a minute)\n",
-				p->ch, p->cfg.hd ? "on" : "off");
+			if (p->audio_slave == 0)
+				stamped(p->log, "  channel %u: the modem's PCM stays master: the slave write goes out and the modem restarts (mobile data drops for about half a minute)\n", p->ch);
+			else
+				stamped(p->log, "  channel %u: HD voice %s: the modem's PCM rate changes and the modem restarts (mobile data drops for about half a minute)\n",
+					p->ch, p->cfg.hd ? "on" : "off");
 			snprintf(cmd, sizeof(cmd), "AT+QDAI=%s,1,0,4,0,%d,1,1", p->qdai_head[0] ? p->qdai_head : "x", p->cfg.hd ? 1 : 0);
 			p->hd_stage = HD_QDAI_WRITE;
 			modem_cmd(p, cmd, p->ch, p->log);
@@ -3173,8 +3220,11 @@ int phone_step(struct phone *p, unsigned long long now)
 			   has, and the setting is taken up again by the next change or the next start */
 			p->hd_gave_up = 1;
 			p->hd_want = 0;
-			stamped(p->log, "  channel %u: the modem is left at %d kHz: HD voice waits for the next settings change\n",
-				p->ch, p->audio_rate == MQ_UNKNOWN ? 0 : (p->audio_rate ? 16 : 8));
+			if (p->audio_slave == 0)
+				stamped(p->log, "  channel %u: the modem keeps its PCM master mode: the voice path cannot work until the next settings change or service start\n", p->ch);
+			else
+				stamped(p->log, "  channel %u: the modem is left at %d kHz: HD voice waits for the next settings change\n",
+					p->ch, p->audio_rate == MQ_UNKNOWN ? 0 : (p->audio_rate ? 16 : 8));
 		}
 	}
 	t0 = clock_ms(c);
@@ -3440,7 +3490,17 @@ void phone_status(const struct phone *p, struct phone_status *st)
 	st->clir_status = p->clir_status == MQ_UNKNOWN ? PHONE_UNKNOWN : p->clir_status;
 	snprintf(st->network, sizeof(st->network), "%s", p->network);
 	snprintf(st->mcc, sizeof(st->mcc), "%s", p->mcc);
+	snprintf(st->mnc, sizeof(st->mnc), "%s", p->mnc);
 	snprintf(st->netname, sizeof(st->netname), "%s", p->netname);
+	snprintf(st->spn, sizeof(st->spn), "%s", p->spn);
+	snprintf(st->serving_mode, sizeof(st->serving_mode), "%s", p->cell.mode);
+	snprintf(st->serving_band, sizeof(st->serving_band), "%s", p->cell.band);
+	st->serving_rsrp = p->cell.rsrp == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->cell.rsrp;
+	/* the raw index is not the signal: the manual converts it, Y = (1/5) x X x 10 - 20 (0..250 -> -20..30 dB) */
+	st->serving_sinr = p->cell.sinr_raw == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->cell.sinr_raw * 2 - 20;
+	st->serving_rsrq = p->cell.rsrq == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->cell.rsrq;
+	st->rssi_dbm = p->rssi_dbm == MQ_UNKNOWN ? PHONE_DBM_UNKNOWN : p->rssi_dbm;
+	st->csq = p->csq == MQ_UNKNOWN ? PHONE_UNKNOWN : p->csq;
 	st->modem_timeouts = p->modem_timeouts;
 	st->modem_reply_ms = p->modem_reply_ms;
 	st->faults = p->faults;

@@ -122,7 +122,8 @@ static struct phone_status blank(void)
 
 	memset(&st, 0, sizeof(st));
 	st.sim_ready = st.registered = st.ims_registered = st.audio_slave = st.audio_rate = st.clir = st.clir_status = st.call_waiting_net = PHONE_UNKNOWN;
-	st.signal_dbm = PHONE_DBM_UNKNOWN;
+	st.csq = PHONE_UNKNOWN;
+	st.signal_dbm = st.rssi_dbm = st.serving_rsrp = st.serving_sinr = st.serving_rsrq = PHONE_DBM_UNKNOWN;
 	return st;
 }
 
@@ -192,7 +193,7 @@ static void test_status_idle(void)
 
 	assert(!strcmp(status_json(&j, &st, &running, 5000),
 		"{\"state\":\"idle\",\"line\":\"idle\",\"hook\":\"on\",\"machine\":\"none\",\"quiet\":false,\"call\":null,"
-		"\"voiceNetwork\":{\"registered\":null,\"ims\":null},\"signal\":{\"rsrpDbm\":null,\"network\":null,\"operator\":null,\"operatorName\":null},"
+		"\"voiceNetwork\":{\"registered\":null,\"ims\":null},\"signal\":{\"rsrpDbm\":null,\"network\":null,\"operator\":null,\"operatorName\":null,\"operatorMnc\":null,\"netMode\":null,\"servingRsrp\":null,\"servingBand\":null,\"sinrDb\":null,\"rsrqDb\":null,\"rssiDbm\":null,\"csq\":null},"
 		"\"service\":{\"running\":true},\"myNumber\":\"\"}"));
 	st.off_hook = 1;
 	assert(strstr(status_json(&j, &st, &running, 5000), "\"hook\":\"off\""));
@@ -216,7 +217,7 @@ static void test_status_down(void)
 	info.line_in_service = 0;
 	assert(!strcmp(status_json(&j, &st, &info, 5000),
 		"{\"state\":\"down\",\"line\":\"down\",\"hook\":null,\"machine\":null,\"quiet\":null,\"call\":null,"
-		"\"voiceNetwork\":{\"registered\":null,\"ims\":null},\"signal\":{\"rsrpDbm\":null,\"network\":null,\"operator\":null,\"operatorName\":null},"
+		"\"voiceNetwork\":{\"registered\":null,\"ims\":null},\"signal\":{\"rsrpDbm\":null,\"network\":null,\"operator\":null,\"operatorName\":null,\"operatorMnc\":null,\"netMode\":null,\"servingRsrp\":null,\"servingBand\":null,\"sinrDb\":null,\"rsrqDb\":null,\"rssiDbm\":null,\"csq\":null},"
 		"\"service\":{\"running\":true},\"myNumber\":\"\"}"));
 }
 
@@ -264,9 +265,9 @@ static void test_status_modem_fields(void)
 	st.ims_registered = 0;
 	st.signal_dbm = -95;
 	snprintf(st.network, sizeof(st.network), "%s", "4G");
-	assert(strstr(status_json(&j, &st, &info, 5000), "\"voiceNetwork\":{\"registered\":true,\"ims\":false},\"signal\":{\"rsrpDbm\":-95,\"network\":\"4G\",\"operator\":null,\"operatorName\":null}"));
+	assert(strstr(status_json(&j, &st, &info, 5000), "\"voiceNetwork\":{\"registered\":true,\"ims\":false},\"signal\":{\"rsrpDbm\":-95,\"network\":\"4G\",\"operator\":null,\"operatorName\":null,\"operatorMnc\":null,\"netMode\":null,\"servingRsrp\":null,\"servingBand\":null,\"sinrDb\":null,\"rsrqDb\":null,\"rssiDbm\":null,\"csq\":null}"));
 	snprintf(st.mcc, sizeof(st.mcc), "%s", "404");	/* the network the line is registered on, three digits */
-	assert(strstr(status_json(&j, &st, &info, 5000), "\"signal\":{\"rsrpDbm\":-95,\"network\":\"4G\",\"operator\":\"404\",\"operatorName\":null}"));
+	assert(strstr(status_json(&j, &st, &info, 5000), "\"signal\":{\"rsrpDbm\":-95,\"network\":\"4G\",\"operator\":\"404\",\"operatorName\":null,\"operatorMnc\":null,\"netMode\":null,\"servingRsrp\":null,\"servingBand\":null,\"sinrDb\":null,\"rsrqDb\":null,\"rssiDbm\":null,\"csq\":null}"));
 	assert(strstr(j.text, "\"myNumber\":\"*88\""));
 	info.my_number = NULL;
 	assert(strstr(status_json(&j, &st, &info, 5000), "\"myNumber\":\"\""));
@@ -292,7 +293,7 @@ static void test_health(void)
 	assert(!strcmp(end(&j),
 		"{\"atPort\":{\"port\":\"/dev/ttyUSB2\",\"usbInterface\":2,\"responding\":true,\"lastReplyAgoSec\":7,\"portOwner\":\"free\"},"
 		"\"line\":{\"channel\":1,\"numbering\":\"\",\"hook\":\"on\",\"state\":\"idle\",\"calibrated\":true,\"batteryMv\":59111,\"loopUa\":-903},"
-		"\"modem\":{\"simReady\":null,\"registered\":null,\"imsRegistered\":null,\"rsrpDbm\":null,\"network\":null,\"operator\":null,\"operatorName\":null,\"audioSlave\":null,\"hdVoice\":\"off\",\"audioRate\":null,\"voiceLayout\":8000,\"callWaiting\":null,\"clir\":null,\"clirStatus\":null},"
+		"\"modem\":{\"simReady\":null,\"registered\":null,\"imsRegistered\":null,\"rsrpDbm\":null,\"network\":null,\"operator\":null,\"operatorName\":null,\"operatorMnc\":null,\"netMode\":null,\"servingRsrp\":null,\"servingBand\":null,\"sinrDb\":null,\"rsrqDb\":null,\"rssiDbm\":null,\"csq\":null,\"audioSlave\":null,\"hdVoice\":\"off\",\"audioRate\":null,\"voiceLayout\":8000,\"callWaiting\":null,\"clir\":null,\"clirStatus\":null},"
 		"\"system\":{\"moduleLoaded\":true,\"bridge\":{\"running\":null,\"frames\":null,\"resyncs\":null,\"txSkipped\":null,\"maxGapUs\":null},\"audioPath\":{\"running\":null,\"wanted\":null,\"why\":null,\"claims\":null,\"upMs\":null,\"starts\":null,\"stops\":null,\"lastError\":null}},"
 		"\"indicator\":{\"led\":null,\"state\":\"off\",\"leds\":null},"
 		"\"counters\":{\"modemTimeouts\":2,\"hookGapsOver20ms\":1,\"hookGapMaxMs\":31,\"faults\":4},"

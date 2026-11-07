@@ -67,7 +67,7 @@ int main(void)
 		char mcc[MQ_MCC_MAX], name[MQ_NETWORK_MAX];
 
 		assert(modemq_operator("AT+COPS?\r\r\n+COPS: 0,0,\"41301\",7\r\n\r\nOK\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 1);
-		assert(!strcmp(mcc, "413") && !name[0]);
+		assert(!strcmp(mcc, "413") && !strcmp(name, "41301"));		/* the field stays as printed: the network code is the rest of it */
 		assert(modemq_operator("+COPS: 0,0,\"413020\",7\r\nOK\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 1);
 		assert(!strcmp(mcc, "413"));					/* a three-digit network code */
 		assert(modemq_operator("+COPS: 0,0,41301,7\r\nOK\r\n", "+COPS:", 2, mcc, sizeof(mcc), name, sizeof(name)) == 1);
@@ -153,6 +153,41 @@ int main(void)
 		assert(modemq_clir("+CLIR: 1,1\r\n", NULL) == 1);
 	}
 
-	assert(modemq_count == 9 && !strcmp(modemq_command[0], "AT+QDAI?") && !strcmp(modemq_command[1], "AT+CLVL=?") && !strcmp(modemq_command[6], "AT+QNWINFO") && !strcmp(modemq_command[7], "AT+CLIR?") && !strcmp(modemq_command[8], "AT+COPS?"));
+	/* the serving cell (AT+QENG="servingcell"): the manual's three shapes, and a "-": a value the modem does not have */
+	{
+		struct modemq_cell c;
+
+		assert(modemq_servingcell("AT+QENG=\"servingcell\"\r\n+QENG: \"servingcell\",\"NOCONN\",\"NR5G-SA\",\"TDD\",\"460\",\"01\",\"6E7309\",456,\"D7A9\",627264,78,100,-85,-12,25\r\n\r\nOK\r\n", &c) == 0);
+		assert(!strcmp(c.mode, "NR5G-SA") && !strcmp(c.state, "NOCONN") && !strcmp(c.mcc, "460") && !strcmp(c.mnc, "01") && !strcmp(c.band, "78") && c.rsrp == -85);
+
+		assert(modemq_servingcell("AT+QENG=\"servingcell\"\r\n+QENG: \"servingcell\",\"NOCONN\"\r\n+QENG: \"LTE\",0,\"460\",\"01\",\"6E7309\",123,1300,3,0,0,\"D7A9\",-85,-12,-61,20\r\n+QENG: \"NR5G-NSA\",\"460\",\"01\",274,-81,160,-11,627264,78\r\n\r\nOK\r\n", &c) == 0);
+		assert(!strcmp(c.mode, "NR5G-NSA") && !strcmp(c.mcc, "460") && !strcmp(c.mnc, "01") && c.rsrp == -81 && !strcmp(c.band, "78"));
+
+		assert(modemq_servingcell("AT+QENG=\"servingcell\"\r\n+QENG: \"servingcell\",\"NOCONN\",\"LTE\",0,\"413\",\"02\",\"6E7309\",123,1300,3,0,0,\"D7A9\",-95,-12,-61,20\r\n\r\nOK\r\n", &c) == 0);
+		assert(!strcmp(c.mode, "LTE") && !strcmp(c.mcc, "413") && !strcmp(c.mnc, "02") && c.rsrp == -95);
+		assert(c.rsrq == -12 && c.rssi == -61 && c.sinr_raw == 20);	/* the manual converts this raw index: 20 x 2 - 20 = 20 dB */
+
+		assert(modemq_servingcell("AT+QENG=\"servingcell\"\r\n+QENG: \"servingcell\",\"NOCONN\",\"NR5G-SA\",\"TDD\",\"460\",\"01\",\"6E7309\",456,\"D7A9\",627264,78,100,-85,-12,25\r\n\r\nOK\r\n", &c) == 0);
+		assert(!strcmp(c.mode, "NR5G-SA") && c.rsrp == -85 && c.rsrq == -12 && c.sinr_raw == MQ_UNKNOWN);
+
+		assert(modemq_servingcell("+QENG: \"servingcell\",\"SEARCH\"\r\n\r\nOK\r\n", &c) == 1 && !strcmp(c.state, "SEARCH"));
+		assert(modemq_servingcell("", &c) == 1);
+
+		/* the strength indicator and the wideband power of an AT+QCSQ answer: TS 27.007's mapping of its RSSI */
+		assert(modemq_csq("+QCSQ: \"LTE\",-62,-93,8,-11\r\n\r\nOK\r\n") == 25);
+		assert(modemq_csq("+QCSQ: \"LTE\",-113,-122,2,-6\r\n\r\nOK\r\n") == 0);
+		assert(modemq_csq("+QCSQ: \"LTE\",-51,-70,20,25\r\n\r\nOK\r\n") == 31);
+		assert(modemq_csq("+QCSQ: \"LTE\",-114,-120,1,-6\r\n\r\nOK\r\n") == MQ_UNKNOWN);	/* below the mapping's range: not invented */
+		assert(modemq_csq("+QCSQ: \"NOSERVICE\"\r\n\r\nOK\r\n") == MQ_UNKNOWN);
+		assert(modemq_rssi_dbm("+QCSQ: \"LTE\",-62,-93,8,-11\r\n\r\nOK\r\n") == -62);
+		assert(modemq_rssi_dbm("+QCSQ: \"NOSERVICE\"\r\n\r\nOK\r\n") == MQ_UNKNOWN);
+
+		/* the service provider name (AT+QSPN): the first quoted string, and nothing when the reply names nothing */
+		assert(modemq_spn("+QSPN: \"Dialog GSM\",\"Dialog\",1\r\n\r\nOK\r\n", net, sizeof(net)) == 1 && !strcmp(net, "Dialog GSM"));
+		assert(modemq_spn("+QSPN: \r\n\r\nOK\r\n", net, sizeof(net)) == 0);
+		assert(modemq_spn("", net, sizeof(net)) == 0);
+	}
+
+	assert(modemq_count == 11 && !strcmp(modemq_command[0], "AT+QDAI?") && !strcmp(modemq_command[1], "AT+CLVL=?") && !strcmp(modemq_command[6], "AT+QNWINFO") && !strcmp(modemq_command[8], "AT+COPS?") && !strcmp(modemq_command[9], "AT+QENG=\"servingcell\"") && !strcmp(modemq_command[10], "AT+QSPN"));
 	return puts("modemq: all tests passed") < 0;
 }

@@ -33,6 +33,14 @@ function netWord(name, mcc) {
 	return name || mcc || '—';
 }
 
+/* this network prints its own name as the same word twice ("Dialog Dialog"): a word repeated back to back is one
+ * name, and the card shows it once */
+function oneName(n) {
+	var m = /^(\S+)\s+\1$/i.exec(n || '');
+
+	return m ? m[1] : (n || '');
+}
+
 function count(v) {
 	return v == null ? '—' : String(v);
 }
@@ -167,11 +175,28 @@ return baseclass.extend({
 			var reg = yn(h.modem.registered, _('Registered'), _('Not registered'));
 			var ims = yn(h.modem.imsRegistered, _('Registered'), _('Not registered'));
 			var audio = yn(h.modem.audioSlave, _('Ready'), _('Not set'));
+			/* the network's own words for where the modem camps: the domain word separates 5G SA from NSA, which the
+			   access technology alone cannot; the numbers belong to the cell the modem actually sits on */
+			var serving = h.modem.netMode
+				? [ h.modem.netMode + (h.modem.servingBand ? ' · ' + _('band') + ' ' + h.modem.servingBand : ''),
+				    h.modem.servingRsrp != null ? h.modem.servingRsrp + ' dBm' : '—' ]
+				: [ '—', 'av-mono' ];
+			/* the PLMN as the telephone world prints it - country code and network code as one number (41302) -
+			   with the name when the modem has one, and nothing invented when it has not */
+			var plmn = h.modem.operator ? h.modem.operator + (h.modem.operatorMnc || '') : null;
+			var operName = h.modem.operatorName || plmn;
+			/* one signal line in the telephone's own order (RSRP, SINR, RSRQ, RSSI, CSQ): the SINR is the modem's
+			   raw index converted by the vendor's rule (Y = (1/5) x X x 10 - 20), and a value the modem has not got
+			   is a dash, not a zero */
+			var sig = function (v, unit) { return v == null ? '—' : v + (unit || ''); };
+			var signal = sig(h.modem.rsrpDbm, ' dBm') + ' / ' + sig(h.modem.sinrDb, ' dB') + ' / ' + sig(h.modem.rsrqDb, ' dB')
+				+ ' / ' + sig(h.modem.rssiDbm, ' dBm') + ' / ' + (h.modem.csq == null ? '—' : _('CSQ %s').format(h.modem.csq));
 			fill(modem, [
-				[ _('SIM'), sim[0], sim[1] ], [ _('Network registration'), reg[0], reg[1] ], [ _('VoLTE registration'), ims[0], ims[1] ],
-				[ _('Signal (RSRP)'), h.modem.rsrpDbm == null ? '—' : h.modem.rsrpDbm + ' dBm', 'av-mono' ],
+				[ _('SIM'), sim[0], sim[1] ], [ _('EPS registration'), reg[0], reg[1] ], [ _('VoLTE registration'), ims[0], ims[1] ],
+				[ _('Signal (RSRP/SINR/RSRQ/RSSI/CSQ)'), signal, 'av-mono' ],
 				[ _('Network'), h.modem.network || '—' ],
-				[ _('Operator'), netWord(h.modem.operatorName, h.modem.operator) ],
+				[ _('Serving cell'), serving[0], serving[1] ],
+				[ _('Operator'), netWord(oneName(operName), plmn) ],
 				[ _('Audio mode'), audio[0], audio[1] ]
 			]);
 
