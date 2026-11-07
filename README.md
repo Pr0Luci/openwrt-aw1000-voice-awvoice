@@ -63,6 +63,16 @@ modem software in between. The LuCI page shows the state and every setting, and 
 
 ---
 
+## What's new in 1.1.5
+
+- **A refused outgoing call leaves the line quiet.** A dial the modem refuses with `ERROR` closed its record but kept
+  the identity the attempt had taken — the call id, the direction and the number — so the audio path went on believing a
+  call was up: the Health card showed **Crossing samples** on a handset nobody was using, and the router's load average
+  followed a bridge that was running for silence. The refusal now clears the identity with the record, exactly as a
+  refusal from the page's phone and an abandoned attempt already do.
+
+---
+
 ## What's new in 1.1.4
 
 - **The line costs nothing while it is quiet.** The audio path is brought up for a call or a claim and stands by when
@@ -125,23 +135,23 @@ loaded until a reboot.
 
 | file in the release | package |
 | --- | --- |
-| `kmod-awvoice-fxs-6.12.94.1.1.4-r1.apk` | the kernel module (built for that exact kernel build) |
-| `awvoice-phoned-1.1.4-r1.apk` | the phone daemon, the board file and the default greeting |
-| `luci-app-awvoice-1.1.4-r1.apk` | the LuCI page |
+| `kmod-awvoice-fxs-6.12.94.1.1.5-r1.apk` | the kernel module (built for that exact kernel build) |
+| `awvoice-phoned-1.1.5-r1.apk` | the phone daemon, the board file and the default greeting |
+| `luci-app-awvoice-1.1.5-r1.apk` | the LuCI page |
 | `SHA256SUMS`, `build-info.txt` | checksums, and the commit, SDK, feeds, kernel and target the build used |
 
 ```sh
 cd /tmp
-REL=https://github.com/Pr0Luci/openwrt-aw1000-voice-awvoice/releases/download/v1.1.4
-for f in kmod-awvoice-fxs-6.12.94.1.1.4-r1.apk awvoice-phoned-1.1.4-r1.apk luci-app-awvoice-1.1.4-r1.apk SHA256SUMS; do
+REL=https://github.com/Pr0Luci/openwrt-aw1000-voice-awvoice/releases/download/v1.1.5
+for f in kmod-awvoice-fxs-6.12.94.1.1.5-r1.apk awvoice-phoned-1.1.5-r1.apk luci-app-awvoice-1.1.5-r1.apk SHA256SUMS; do
   wget "$REL/$f"
 done
 sha256sum -c SHA256SUMS
 
 apk add --allow-untrusted \
-  /tmp/kmod-awvoice-fxs-6.12.94.1.1.4-r1.apk \
-  /tmp/awvoice-phoned-1.1.4-r1.apk \
-  /tmp/luci-app-awvoice-1.1.4-r1.apk
+  /tmp/kmod-awvoice-fxs-6.12.94.1.1.5-r1.apk \
+  /tmp/awvoice-phoned-1.1.5-r1.apk \
+  /tmp/luci-app-awvoice-1.1.5-r1.apk
 reboot
 ```
 
@@ -701,7 +711,7 @@ and time.
 ```sh
 scripts/build.sh          # the package set, inside the pinned builder image
 scripts/test.sh           # the host suites, the same ones CI runs
-scripts/version.sh set 1.1.4   # walk VERSION and the three PKG_VERSIONs together
+scripts/version.sh set 1.1.5   # walk VERSION and the three PKG_VERSIONs together
 ```
 
 ### Build from source
